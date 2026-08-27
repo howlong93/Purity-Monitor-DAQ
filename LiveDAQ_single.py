@@ -20,12 +20,11 @@ import math
 import os
 import queue
 import random
-import statistics
 import sys
 import threading
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Sequence
@@ -83,7 +82,7 @@ class LiveConfig:
 @dataclass(frozen=True)
 class DataChunk:
     start_sample: int
-    voltages: list[float]
+    voltages: np.ndarray
     lost_samples: int = 0
     corrupted_samples: int = 0
 
@@ -110,10 +109,6 @@ class ActiveCapture:
     baseline_v: float
     peak_search_end: int
     capture_end: int
-    peak_sample: int
-    peak_voltage_v: float
-    waveform_samples: list[int] = field(default_factory=list)
-    waveform_voltages: list[float] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -170,7 +165,7 @@ class SharedMonitorState:
 
 
 class StreamingPulseDetector:
-    """Stateful Channel-1-only detector suitable for chunked live data."""
+    """Chunk-vectorized Channel-1-only detector for live NumPy data."""
 
     def __init__(
         self,
@@ -189,21 +184,25 @@ class StreamingPulseDetector:
         )
         self.baseline_guard = max(self.edge_lag * 2, round(0.04 * self.tau_samples))
         self.baseline_samples = max(5, self.tau_samples)
-        self.pretrigger_samples = max(1, round(config.pretrigger_ms * 1e-3 * sample_rate_hz))
-        self.posttrigger_samples = max(1, round(config.posttrigger_ms * 1e-3 * sample_rate_hz))
+        self.pretrigger_samples = max(
+            1, round(config.pretrigger_ms * 1e-3 * sample_rate_hz)
+        )
+        self.posttrigger_samples = max(
+            1, round(config.posttrigger_ms * 1e-3 * sample_rate_hz)
+        )
         self.peak_lookahead = max(self.edge_lag, round(0.35 * self.tau_samples))
         self.refractory_samples = max(1, round(0.75 * self.tau_samples))
-        history_size = (
-            self.pretrigger_samples
-            + self.baseline_samples
-            + self.baseline_guard
-            + self.edge_lag
+        self.history_samples = (
+            max(
+                self.pretrigger_samples,
+                self.baseline_samples + self.baseline_guard,
+                self.edge_lag,
+            )
             + 16
         )
-        self.history: deque[tuple[int, float]] = deque(maxlen=history_size)
-        # Uniformly collect only about 5,000 edge samples during each one-second
-        # statistics interval.  The expensive median/MAD update therefore does
-        # not scale with the acquisition sample rate.
+
+        self._buffer_start_sample: int | None = None
+        self._buffer_values = np.empty(0, dtype=np.float64)
         self.noise_sample_indices: list[int] = []
         self.noise_edge_samples: list[float] = []
         self.noise_exclusion_ranges: deque[tuple[int, int]] = deque()
@@ -216,13 +215,22 @@ class StreamingPulseDetector:
         self._last_noise_update = 0
         self._last_sample: int | None = None
         self._last_candidate = -10**18
+        self._candidate_block_until = -10**18
         self._active: ActiveCapture | None = None
         self._pulse_count = 0
 
-    def reset_after_gap(self) -> None:
-        self.history.clear()
+    def reset_after_gap(self, next_sample: int | None = None) -> None:
+        self._buffer_start_sample = None
+        self._buffer_values = np.empty(0, dtype=np.float64)
         self._active = None
         self._last_sample = None
+        self._last_candidate = -10**18
+        self._candidate_block_until = -10**18
+        self.noise_sample_indices.clear()
+        self.noise_edge_samples.clear()
+        self.noise_exclusion_ranges.clear()
+        if next_sample is not None:
+            self._last_noise_update = next_sample
 
     def _update_noise(self, sample_index: int) -> None:
         if sample_index - self._last_noise_update < self.noise_update_samples:
@@ -240,9 +248,11 @@ class StreamingPulseDetector:
             self.noise_exclusion_ranges.popleft()
         for exclusion_start, exclusion_end in self.noise_exclusion_ranges:
             valid &= (indices < exclusion_start) | (indices > exclusion_end)
-        if self._active is not None and self._active.waveform_samples:
-            active_start = self._active.waveform_samples[0]
-            valid &= (indices < active_start) | (indices > self._active.capture_end)
+        if self._active is not None:
+            active_start = self._active.onset_sample - self.pretrigger_samples
+            valid &= (indices < active_start) | (
+                indices > self._active.capture_end
+            )
 
         background = edges[valid]
         if background.size >= NOISE_MIN_VALID_SAMPLES:
@@ -258,78 +268,139 @@ class StreamingPulseDetector:
         self._last_noise_update = sample_index
 
     def _threshold_v(self) -> float:
-        # Do not trigger during the short startup interval used to learn the
-        # actual Channel 1 noise. This prevents a random startup excursion from
-        # opening a long event capture and hiding the first physical pulse.
         if not self.noise_ready:
             return math.inf
         minimum = self.config.min_charge_fc * 1e-3 * self.config.gain_v_per_pc
         adaptive = self.config.threshold_sigma * self.noise_sigma_v * math.sqrt(2.0)
         return max(minimum, adaptive)
 
-    def _create_capture(self, sample_index: int, voltage_v: float) -> None:
+    def _append_buffer(self, start_sample: int, values: np.ndarray) -> None:
+        if values.size == 0:
+            return
+        if self._buffer_start_sample is None:
+            self._buffer_start_sample = start_sample
+            self._buffer_values = values.copy()
+            return
+        expected = self._buffer_start_sample + self._buffer_values.size
+        if start_sample != expected:
+            raise RuntimeError(
+                f"Detector buffer discontinuity: expected sample {expected}, "
+                f"received {start_sample}."
+            )
+        self._buffer_values = np.concatenate((self._buffer_values, values))
+
+    def _slice_buffer(
+        self,
+        start_sample: int,
+        end_sample_exclusive: int,
+    ) -> np.ndarray | None:
+        if self._buffer_start_sample is None:
+            return None
+        buffer_end = self._buffer_start_sample + self._buffer_values.size
+        if (
+            start_sample < self._buffer_start_sample
+            or end_sample_exclusive > buffer_end
+            or end_sample_exclusive <= start_sample
+        ):
+            return None
+        start_offset = start_sample - self._buffer_start_sample
+        end_offset = end_sample_exclusive - self._buffer_start_sample
+        return self._buffer_values[start_offset:end_offset]
+
+    def _trim_buffer(self) -> None:
+        if self._buffer_start_sample is None or self._buffer_values.size == 0:
+            return
+        buffer_end = self._buffer_start_sample + self._buffer_values.size
+        keep_from = max(self._buffer_start_sample, buffer_end - self.history_samples)
+        if self._active is not None:
+            keep_from = min(
+                keep_from,
+                self._active.onset_sample - self.pretrigger_samples,
+            )
+        drop = keep_from - self._buffer_start_sample
+        if drop > 0:
+            self._buffer_values = self._buffer_values[drop:].copy()
+            self._buffer_start_sample = keep_from
+
+    def _new_edges(
+        self,
+        start_sample: int,
+        values: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        prior_tail = self._buffer_values[-self.edge_lag :]
+        if prior_tail.size:
+            combined = np.concatenate((prior_tail, values))
+        else:
+            combined = values
+        tail_count = prior_tail.size
+        first_local = max(0, self.edge_lag - tail_count)
+        if first_local >= values.size:
+            return (
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.float64),
+            )
+        local_indices = np.arange(first_local, values.size, dtype=np.int64)
+        combined_current = tail_count + local_indices
+        lagged = combined[combined_current - self.edge_lag]
+        edges = values[local_indices] - lagged
+        return start_sample + local_indices, edges
+
+    def _collect_noise_samples(
+        self,
+        edge_indices: np.ndarray,
+        edges: np.ndarray,
+    ) -> None:
+        if edge_indices.size == 0:
+            return
+        first_offset = (-int(edge_indices[0])) % self.noise_stride
+        sampled_indices = edge_indices[first_offset:: self.noise_stride]
+        sampled_edges = edges[first_offset:: self.noise_stride]
+        self.noise_sample_indices.extend(sampled_indices.tolist())
+        self.noise_edge_samples.extend(sampled_edges.tolist())
+
+    def _create_capture(self, sample_index: int) -> bool:
         baseline_end = sample_index - self.baseline_guard
         baseline_start = baseline_end - self.baseline_samples
-        baseline_values = [
-            value
-            for index, value in self.history
-            if baseline_start <= index < baseline_end
-        ]
-        if len(baseline_values) < 5:
-            return
-        baseline_v = statistics.median(baseline_values)
-        waveform_start = sample_index - self.pretrigger_samples
-        waveform = [
-            (index, value)
-            for index, value in self.history
-            if index >= waveform_start
-        ]
-        waveform.append((sample_index, voltage_v))
-        peak_candidates = [
-            item for item in waveform if item[0] >= sample_index - self.edge_lag
-        ]
-        peak_sample, peak_voltage = max(
-            peak_candidates,
-            key=lambda item: abs(item[1] - baseline_v),
-        )
+        baseline_values = self._slice_buffer(baseline_start, baseline_end)
+        if baseline_values is None or baseline_values.size < 5:
+            return False
         self._active = ActiveCapture(
             onset_sample=sample_index,
-            baseline_v=baseline_v,
+            baseline_v=float(np.median(baseline_values)),
             peak_search_end=sample_index + self.peak_lookahead,
             capture_end=sample_index + self.posttrigger_samples,
-            peak_sample=peak_sample,
-            peak_voltage_v=peak_voltage,
-            waveform_samples=[item[0] for item in waveform],
-            waveform_voltages=[item[1] for item in waveform],
         )
         self._last_candidate = sample_index
+        self._candidate_block_until = self._active.capture_end
+        return True
 
-    def _advance_capture(
-        self,
-        sample_index: int,
-        voltage_v: float,
-    ) -> LivePulse | None:
+    def _finalize_active(self) -> LivePulse | None:
         active = self._active
         if active is None:
             return None
-        active.waveform_samples.append(sample_index)
-        active.waveform_voltages.append(voltage_v)
-        if (
-            sample_index <= active.peak_search_end
-            and abs(voltage_v - active.baseline_v)
-            > abs(active.peak_voltage_v - active.baseline_v)
-        ):
-            active.peak_sample = sample_index
-            active.peak_voltage_v = voltage_v
-        if sample_index < active.capture_end:
+        waveform_start = active.onset_sample - self.pretrigger_samples
+        waveform_end_exclusive = active.capture_end + 1
+        waveform = self._slice_buffer(waveform_start, waveform_end_exclusive)
+        if waveform is None:
             return None
 
+        peak_start = max(waveform_start, active.onset_sample - self.edge_lag)
+        peak_end_exclusive = min(
+            waveform_end_exclusive,
+            active.peak_search_end + 1,
+        )
+        peak_values = self._slice_buffer(peak_start, peak_end_exclusive)
+        if peak_values is None or peak_values.size == 0:
+            return None
+        peak_offset = int(np.argmax(np.abs(peak_values - active.baseline_v)))
+        peak_sample = peak_start + peak_offset
+        peak_voltage_v = float(peak_values[peak_offset])
+        amplitude_v = peak_voltage_v - active.baseline_v
+
         self._active = None
-        if active.waveform_samples:
-            self.noise_exclusion_ranges.append(
-                (active.waveform_samples[0], active.capture_end)
-            )
-        amplitude_v = active.peak_voltage_v - active.baseline_v
+        self.noise_exclusion_ranges.append(
+            (waveform_start, active.capture_end)
+        )
         if abs(amplitude_v) < self._threshold_v():
             return None
         if self.config.polarity == "positive" and amplitude_v <= 0.0:
@@ -338,59 +409,79 @@ class StreamingPulseDetector:
             return None
 
         self._pulse_count += 1
-        elapsed_s = active.peak_sample / self.sample_rate_hz
+        elapsed_s = peak_sample / self.sample_rate_hz
         timestamp = self.run_start + timedelta(seconds=elapsed_s)
         charge_fc = amplitude_v / self.config.gain_v_per_pc * 1000.0
-        waveform_time = tuple(
-            (index - active.peak_sample) / self.sample_rate_hz
-            for index in active.waveform_samples
+        waveform_samples = np.arange(
+            waveform_start,
+            waveform_end_exclusive,
+            dtype=np.int64,
         )
+        waveform_time = (waveform_samples - peak_sample) / self.sample_rate_hz
         return LivePulse(
             number=self._pulse_count,
-            peak_sample=active.peak_sample,
+            peak_sample=peak_sample,
             peak_elapsed_s=elapsed_s,
             peak_timestamp=timestamp.isoformat(timespec="milliseconds"),
             polarity="positive" if amplitude_v > 0.0 else "negative",
-            peak_voltage_v=active.peak_voltage_v,
+            peak_voltage_v=peak_voltage_v,
             baseline_v=active.baseline_v,
             amplitude_v=amplitude_v,
             signed_charge_fc=charge_fc,
             absolute_charge_fc=abs(charge_fc),
-            waveform_time_s=waveform_time,
-            waveform_voltage_v=tuple(active.waveform_voltages),
+            waveform_time_s=tuple(waveform_time.tolist()),
+            waveform_voltage_v=tuple(waveform.tolist()),
         )
 
     def process_chunk(self, chunk: DataChunk) -> list[LivePulse]:
+        values = np.asarray(chunk.voltages, dtype=np.float64).reshape(-1)
+        discontinuity = (
+            self._last_sample is not None
+            and chunk.start_sample != self._last_sample + 1
+        )
+        if chunk.lost_samples or discontinuity:
+            self.reset_after_gap(chunk.start_sample)
+        if values.size == 0:
+            return []
+
+        edge_indices, edges = self._new_edges(chunk.start_sample, values)
+        self._append_buffer(chunk.start_sample, values)
+        self._collect_noise_samples(edge_indices, edges)
+
+        threshold_v = self._threshold_v()
+        if math.isfinite(threshold_v):
+            candidate_indices = edge_indices[np.abs(edges) >= threshold_v]
+        else:
+            candidate_indices = np.empty(0, dtype=np.int64)
+
         pulses: list[LivePulse] = []
-        if chunk.lost_samples:
-            self.reset_after_gap()
-        if self._last_sample is not None and chunk.start_sample != self._last_sample + 1:
-            self.reset_after_gap()
+        buffer_end_sample = chunk.start_sample + values.size - 1
+        if (
+            self._active is not None
+            and self._active.capture_end <= buffer_end_sample
+        ):
+            pulse = self._finalize_active()
+            if pulse is not None:
+                pulses.append(pulse)
 
-        for offset, voltage_v in enumerate(chunk.voltages):
-            sample_index = chunk.start_sample + offset
-            edge: float | None = None
-            if len(self.history) >= self.edge_lag:
-                lagged_voltage = self.history[-self.edge_lag][1]
-                edge = voltage_v - lagged_voltage
-                if sample_index % self.noise_stride == 0:
-                    self.noise_sample_indices.append(sample_index)
-                    self.noise_edge_samples.append(edge)
-                self._update_noise(sample_index)
-
+        for candidate_value in candidate_indices:
+            candidate = int(candidate_value)
+            if candidate <= self._candidate_block_until:
+                continue
+            if candidate - self._last_candidate < self.refractory_samples:
+                continue
             if self._active is not None:
-                pulse = self._advance_capture(sample_index, voltage_v)
+                break
+            if not self._create_capture(candidate):
+                continue
+            if self._active.capture_end <= buffer_end_sample:
+                pulse = self._finalize_active()
                 if pulse is not None:
                     pulses.append(pulse)
-            elif (
-                edge is not None
-                and abs(edge) >= self._threshold_v()
-                and sample_index - self._last_candidate >= self.refractory_samples
-            ):
-                self._create_capture(sample_index, voltage_v)
 
-            self.history.append((sample_index, voltage_v))
-            self._last_sample = sample_index
+        self._last_sample = chunk.start_sample + values.size - 1
+        self._update_noise(self._last_sample)
+        self._trim_buffer()
         return pulses
 
 
@@ -659,7 +750,7 @@ class DwfAD3Source:
             if lost.value or corrupted.value:
                 return DataChunk(
                     start_sample=start_sample,
-                    voltages=[],
+                    voltages=np.empty(0, dtype=np.float64),
                     lost_samples=lost.value,
                     corrupted_samples=corrupted.value,
                 )
@@ -677,7 +768,7 @@ class DwfAD3Source:
         self.sample_cursor += available.value
         return DataChunk(
             start_sample=start_sample,
-            voltages=list(data),
+            voltages=np.ctypeslib.as_array(data).copy(),
             lost_samples=lost.value,
             corrupted_samples=corrupted.value,
         )
@@ -742,7 +833,10 @@ class SimulatedSource:
         self.sample_cursor += self.chunk_samples
         if self.speed > 0.0:
             time.sleep(self.chunk_samples / self.sample_rate_hz / self.speed)
-        return DataChunk(start_sample=start, voltages=values)
+        return DataChunk(
+            start_sample=start,
+            voltages=np.asarray(values, dtype=np.float64),
+        )
 
     def close(self) -> None:
         self._started = False
