@@ -30,12 +30,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
+
 
 DEFAULT_SAMPLE_RATE_HZ = 500_000.0
 DEFAULT_INPUT_RANGE_V = 1.0
 DEFAULT_GAIN_V_PER_PC = 1.4
 DEFAULT_TAU_US = 140.0
 DEFAULT_GUI_RATE_HZ = 10.0
+NOISE_UPDATE_INTERVAL_S = 1.0
+NOISE_TARGET_SAMPLES = 5_000
+NOISE_MIN_VALID_SAMPLES = 1_000
 
 # GUI batch size. Change this single value to display/output a different
 # number of newly detected pulses per GUI refresh batch.
@@ -164,14 +169,6 @@ class SharedMonitorState:
             )
 
 
-def robust_sigma(values: Sequence[float]) -> float:
-    if not values:
-        return 0.0
-    center = statistics.median(values)
-    mad = statistics.median(abs(value - center) for value in values)
-    return 1.4826 * mad
-
-
 class StreamingPulseDetector:
     """Stateful Channel-1-only detector suitable for chunked live data."""
 
@@ -204,9 +201,16 @@ class StreamingPulseDetector:
             + 16
         )
         self.history: deque[tuple[int, float]] = deque(maxlen=history_size)
-        self.noise_edges: deque[float] = deque(maxlen=50_000)
-        self.noise_stride = max(1, round(sample_rate_hz / 50_000.0))
-        self.noise_update_samples = max(1, round(0.02 * sample_rate_hz))
+        # Uniformly collect only about 5,000 edge samples during each one-second
+        # statistics interval.  The expensive median/MAD update therefore does
+        # not scale with the acquisition sample rate.
+        self.noise_sample_indices: list[int] = []
+        self.noise_edge_samples: list[float] = []
+        self.noise_exclusion_ranges: deque[tuple[int, int]] = deque()
+        self.noise_stride = max(1, round(sample_rate_hz / NOISE_TARGET_SAMPLES))
+        self.noise_update_samples = max(
+            1, round(NOISE_UPDATE_INTERVAL_S * sample_rate_hz)
+        )
         self.noise_sigma_v = 0.0
         self.noise_ready = False
         self._last_noise_update = 0
@@ -221,14 +225,37 @@ class StreamingPulseDetector:
         self._last_sample = None
 
     def _update_noise(self, sample_index: int) -> None:
-        if (
-            sample_index - self._last_noise_update >= self.noise_update_samples
-            and len(self.noise_edges) >= 100
+        if sample_index - self._last_noise_update < self.noise_update_samples:
+            return
+
+        indices = np.asarray(self.noise_sample_indices, dtype=np.int64)
+        edges = np.asarray(self.noise_edge_samples, dtype=np.float64)
+        valid = np.ones(edges.size, dtype=bool)
+
+        interval_start = sample_index - self.noise_update_samples + 1
+        while (
+            self.noise_exclusion_ranges
+            and self.noise_exclusion_ranges[0][1] < interval_start
         ):
-            edge_sigma = robust_sigma(list(self.noise_edges))
+            self.noise_exclusion_ranges.popleft()
+        for exclusion_start, exclusion_end in self.noise_exclusion_ranges:
+            valid &= (indices < exclusion_start) | (indices > exclusion_end)
+        if self._active is not None and self._active.waveform_samples:
+            active_start = self._active.waveform_samples[0]
+            valid &= (indices < active_start) | (indices > self._active.capture_end)
+
+        background = edges[valid]
+        if background.size >= NOISE_MIN_VALID_SAMPLES:
+            center = np.median(background)
+            mad = np.median(np.abs(background - center))
+            edge_sigma = 1.4826 * float(mad)
             self.noise_sigma_v = edge_sigma / math.sqrt(2.0)
             self.noise_ready = self.noise_sigma_v > 0.0
-            self._last_noise_update = sample_index
+
+        self.noise_sample_indices.clear()
+        self.noise_edge_samples.clear()
+        self.noise_exclusion_ranges.clear()
+        self._last_noise_update = sample_index
 
     def _threshold_v(self) -> float:
         # Do not trigger during the short startup interval used to learn the
@@ -298,6 +325,10 @@ class StreamingPulseDetector:
             return None
 
         self._active = None
+        if active.waveform_samples:
+            self.noise_exclusion_ranges.append(
+                (active.waveform_samples[0], active.capture_end)
+            )
         amplitude_v = active.peak_voltage_v - active.baseline_v
         if abs(amplitude_v) < self._threshold_v():
             return None
@@ -343,7 +374,8 @@ class StreamingPulseDetector:
                 lagged_voltage = self.history[-self.edge_lag][1]
                 edge = voltage_v - lagged_voltage
                 if sample_index % self.noise_stride == 0:
-                    self.noise_edges.append(edge)
+                    self.noise_sample_indices.append(sample_index)
+                    self.noise_edge_samples.append(edge)
                 self._update_noise(sample_index)
 
             if self._active is not None:
@@ -831,7 +863,7 @@ class AcquisitionWorker(threading.Thread):
                 str(self.logger.run_directory) if self.logger.run_directory else "Disabled"
             )
             self.state.update(
-                status="Running",
+                status="Learning noise (1 s warm-up)",
                 source_name=f"{self.source.name} (DWF {self.source.version})",
                 sample_rate_hz=self.source.sample_rate_hz,
                 output_directory=output_directory,
@@ -852,6 +884,11 @@ class AcquisitionWorker(threading.Thread):
                     / self.source.sample_rate_hz
                 )
                 self.state.update(
+                    status=(
+                        "Running"
+                        if detector.noise_ready
+                        else "Learning noise (1 s warm-up)"
+                    ),
                     elapsed_s=elapsed_s,
                     event_count=detector._pulse_count,
                     lost_samples=lost_total,
