@@ -3,8 +3,9 @@
 
 The hardware mode owns the AD3 through the Digilent WaveForms SDK, streams
 Scope Channel 1 continuously in Record mode, detects pulses without Channel 2,
-and displays detected events in configurable batches in a small Tk GUI. The default charge
-conversion is the uncalibrated CR-110 nominal gain of 1.4 V/pC.
+and displays configurable non-overlapping pulse batches in a small Tk GUI while
+result rows update in independent batches. The default charge conversion is the
+uncalibrated CR-110 nominal gain of 1.4 V/pC.
 
 Close the WaveForms application before starting hardware mode: only one process
 can own a Digilent device at a time.
@@ -41,12 +42,14 @@ NOISE_UPDATE_INTERVAL_S = 1.0
 NOISE_TARGET_SAMPLES = 5_000
 NOISE_MIN_VALID_SAMPLES = 1_000
 
-# GUI batch size. Change this single value to display/output a different
-# number of newly detected pulses per GUI refresh batch.
-NUM_TEST = 5
+# Number of result rows replaced together as one non-overlapping batch.
+NUM_TEST = 10
+
+# Number of waveforms overlaid together as one non-overlapping canvas batch.
+DEFAULT_CANVA_SIZE = 1
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
-DEFAULT_OUTPUT_ROOT = SCRIPT_DIRECTORY / "AD3 results" / "live"
+DEFAULT_OUTPUT_ROOT = SCRIPT_DIRECTORY / "results" / "live"
 
 # Relevant WaveForms SDK constants. These values match the official
 # dwfconstants.py installed with WaveForms SDK (revision 2024-07-24).
@@ -73,6 +76,7 @@ class LiveConfig:
     posttrigger_ms: float
     gui_rate_hz: float
     num_test: int
+    canva_size: int
     wavegen_enabled: bool
     wavegen_frequency_hz: float
     wavegen_vpp: float
@@ -1251,7 +1255,7 @@ class LiveDAQWindow:
         elif batch_updated:
             self.result_var.set(
                 "\n".join(
-                    f"#{pulse.number:06d} | {pulse.peak_timestamp} | "
+                    f"#{pulse.number:06d} | {pulse.peak_timestamp[11:23]} | "
                     f"t={pulse.peak_elapsed_s:.6f} s | {pulse.polarity:8s} | "
                     f"A={pulse.amplitude_v * 1e3:+.3f} mV | "
                     f"Q={pulse.absolute_charge_fc:.3f} fC"
@@ -1306,8 +1310,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=NUM_TEST,
         help=(
-            "Number of newly detected pulses displayed per GUI batch "
+            "Number of result rows replaced per non-overlapping GUI batch "
             f"(default: NUM_TEST={NUM_TEST})."
+        ),
+    )
+    parser.add_argument(
+        "--canva-size",
+        dest="canva_size",
+        type=int,
+        default=DEFAULT_CANVA_SIZE,
+        help=(
+            "Number of newly detected pulses overlaid per non-overlapping "
+            f"canvas update (default: {DEFAULT_CANVA_SIZE})."
         ),
     )
     parser.add_argument(
@@ -1363,6 +1377,8 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--pretrigger-ms and --posttrigger-ms must be positive")
     if args.num_test <= 0:
         parser.error("--num-test must be a positive integer")
+    if args.canva_size <= 0:
+        parser.error("--canva-size must be a positive integer")
     if args.duration < 0.0:
         parser.error("--duration cannot be negative")
     if args.simulation_speed <= 0.0:
@@ -1384,6 +1400,7 @@ def make_config(args: argparse.Namespace) -> LiveConfig:
         posttrigger_ms=args.posttrigger_ms,
         gui_rate_hz=args.gui_rate,
         num_test=args.num_test,
+        canva_size=args.canva_size,
         wavegen_enabled=args.wavegen,
         wavegen_frequency_hz=args.wavegen_frequency,
         wavegen_vpp=args.wavegen_vpp,
@@ -1441,6 +1458,104 @@ def run_headless(
     return 1 if snapshot.error else 0
 
 
+class SinglePulseLiveDAQWindow(LiveDAQWindow):
+    """Update canvas and result rows using independent complete pulse batches."""
+
+    def __init__(
+        self,
+        state: SharedMonitorState,
+        stop_event: threading.Event,
+        worker: AcquisitionWorker,
+        gui_rate_hz: float,
+        num_test: int,
+        canva_size: int,
+    ) -> None:
+        super().__init__(state, stop_event, worker, gui_rate_hz, num_test)
+        self.canva_size = canva_size
+        self.pending_canvas_pulses: list[LivePulse] = []
+        self.displayed_canvas_pulses: list[LivePulse] = []
+        self.pending_results: list[LivePulse] = []
+        self.displayed_results: list[LivePulse] = []
+        self.result_frame.configure(
+            text=f"Latest complete result batch ({self.num_test} pulses)"
+        )
+        self.result_var.set(
+            f"Waiting for {self.num_test} charge pulses... (0/{self.num_test})"
+        )
+
+    def refresh(self) -> None:
+        if self.closing:
+            return
+
+        while True:
+            try:
+                pulse = self.state.events.get_nowait()
+            except queue.Empty:
+                break
+            self.pending_canvas_pulses.append(pulse)
+            self.pending_results.append(pulse)
+
+        canvas_updated = False
+        while len(self.pending_canvas_pulses) >= self.canva_size:
+            self.displayed_canvas_pulses = self.pending_canvas_pulses[
+                : self.canva_size
+            ]
+            del self.pending_canvas_pulses[: self.canva_size]
+            canvas_updated = True
+
+        batch_updated = False
+        while len(self.pending_results) >= self.num_test:
+            self.displayed_results = self.pending_results[: self.num_test]
+            del self.pending_results[: self.num_test]
+            batch_updated = True
+
+        if canvas_updated:
+            self._draw_waveforms(self.displayed_canvas_pulses)
+
+        snapshot = self.state.snapshot()
+        warning = ""
+        if snapshot.lost_samples or snapshot.corrupted_samples:
+            warning = "  DATA WARNING"
+        self.status_var.set(
+            f"{snapshot.status} | {snapshot.source_name} | "
+            f"{snapshot.sample_rate_hz / 1e3:.3f} kS/s | "
+            f"elapsed {snapshot.elapsed_s:.2f} s | events {snapshot.event_count} | "
+            f"lost {snapshot.lost_samples} | "
+            f"corrupted {snapshot.corrupted_samples} | "
+            f"noise {snapshot.noise_sigma_v * 1e3:.3f} mV | "
+            f"canvas {len(self.pending_canvas_pulses)}/{self.canva_size}{warning}"
+        )
+        self.output_var.set(f"Output: {snapshot.output_directory}")
+        self.result_frame.configure(
+            text=(
+                f"Latest complete result batch ({self.num_test} pulses) | "
+                f"next batch {len(self.pending_results)}/{self.num_test}"
+            )
+        )
+
+        if snapshot.error:
+            self.result_var.set(f"ERROR: {snapshot.error}")
+        elif batch_updated:
+            self.result_var.set(
+                "\n".join(
+                    f"#{pulse.number:06d} | {pulse.peak_timestamp[11:23]} | "
+                    f"t={pulse.peak_elapsed_s:.6f} s | {pulse.polarity:8s} | "
+                    f"A={pulse.amplitude_v * 1e3:+.3f} mV | "
+                    f"Q={pulse.absolute_charge_fc:.3f} fC"
+                    for pulse in self.displayed_results
+                )
+            )
+        elif not self.displayed_results:
+            self.result_var.set(
+                f"Waiting for {self.num_test} charge pulses... "
+                f"({len(self.pending_results)}/{self.num_test})"
+            )
+
+        if snapshot.error or snapshot.status == "Stopped":
+            self.stop_button.configure(text="Close", command=self.root.destroy)
+        self.root.after(self.update_ms, self.refresh)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1477,12 +1592,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_headless(state, stop_event, worker, args.duration)
 
     try:
-        window = LiveDAQWindow(
+        window = SinglePulseLiveDAQWindow(
             state,
             stop_event,
             worker,
             args.gui_rate,
             args.num_test,
+            args.canva_size,
         )
         if args.duration:
             window.root.after(round(args.duration * 1000), window.request_stop)

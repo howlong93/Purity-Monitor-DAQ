@@ -3,8 +3,9 @@
 
 The hardware mode owns the AD3 through the Digilent WaveForms SDK, streams
 Scope Channel 1 continuously in Record mode, detects pulses without Channel 2,
-and displays the newest event in a small Tk GUI while result rows update in batches. The default charge
-conversion is the uncalibrated CR-110 nominal gain of 1.4 V/pC.
+and displays consecutive, non-overlapping waveform windows of a configurable
+duration in a small Tk GUI. Result rows update independently in complete batches.
+The default charge conversion is the uncalibrated CR-110 nominal gain of 1.4 V/pC.
 
 Close the WaveForms application before starting hardware mode: only one process
 can own a Digilent device at a time.
@@ -36,17 +37,18 @@ DEFAULT_SAMPLE_RATE_HZ = 500_000.0
 DEFAULT_INPUT_RANGE_V = 1.0
 DEFAULT_GAIN_V_PER_PC = 1.4
 DEFAULT_TAU_US = 140.0
-DEFAULT_GUI_RATE_HZ = 10.0
+DEFAULT_GUI_RATE_HZ = 2.0
 NOISE_UPDATE_INTERVAL_S = 1.0
 NOISE_TARGET_SAMPLES = 5_000
 NOISE_MIN_VALID_SAMPLES = 1_000
+DEFAULT_CANVA_SIZE_S = 0.5
+CANVAS_MAX_SAMPLES = 50_000
 
 # Number of result rows replaced together as one non-overlapping batch.
-# The canvas itself always shows only the newest detected pulse.
 NUM_TEST = 10
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
-DEFAULT_OUTPUT_ROOT = SCRIPT_DIRECTORY / "AD3 results" / "live"
+DEFAULT_OUTPUT_ROOT = SCRIPT_DIRECTORY / "results" / "live"
 
 # Relevant WaveForms SDK constants. These values match the official
 # dwfconstants.py installed with WaveForms SDK (revision 2024-07-24).
@@ -73,6 +75,7 @@ class LiveConfig:
     posttrigger_ms: float
     gui_rate_hz: float
     num_test: int
+    canva_size: float
     wavegen_enabled: bool
     wavegen_frequency_hz: float
     wavegen_vpp: float
@@ -101,6 +104,14 @@ class LivePulse:
     absolute_charge_fc: float
     waveform_time_s: tuple[float, ...]
     waveform_voltage_v: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class PlotWindow:
+    start_sample: int
+    source_sample_count: int
+    sample_offsets: np.ndarray
+    voltages: np.ndarray
 
 
 @dataclass
@@ -139,6 +150,9 @@ class SharedMonitorState:
         self._output_directory = ""
         self._error = ""
         self.events: queue.Queue[LivePulse] = queue.Queue()
+        # Chunks are queued by reference, so publishing plot data does not copy
+        # the acquisition buffer or delay pulse detection.
+        self.plot_chunks: queue.SimpleQueue[DataChunk] = queue.SimpleQueue()
 
     def update(self, **values: object) -> None:
         with self._lock:
@@ -483,6 +497,109 @@ class StreamingPulseDetector:
         self._update_noise(self._last_sample)
         self._trim_buffer()
         return pulses
+
+
+class ContinuousPlotAccumulator:
+    """Build fixed, consecutive plot windows without a sliding-window copy."""
+
+    def __init__(self, sample_rate_hz: float, window_s: float) -> None:
+        self.sample_rate_hz = sample_rate_hz
+        self.window_s = window_s
+        self.window_samples = max(1, round(window_s * sample_rate_hz))
+        self._start_sample: int | None = None
+        self._next_sample: int | None = None
+        self._sample_count = 0
+        self._parts: list[np.ndarray] = []
+
+    @property
+    def pending_fraction(self) -> float:
+        return self._sample_count / self.window_samples
+
+    def reset(self) -> None:
+        self._start_sample = None
+        self._next_sample = None
+        self._sample_count = 0
+        self._parts.clear()
+
+    def _finish_window(self) -> PlotWindow:
+        assert self._start_sample is not None
+        if len(self._parts) == 1:
+            full_window = np.asarray(self._parts[0], dtype=np.float64)
+        else:
+            full_window = np.concatenate(self._parts)
+        stride = max(1, math.ceil(full_window.size / CANVAS_MAX_SAMPLES))
+        offsets = np.arange(0, full_window.size, stride, dtype=np.int64)
+        window = PlotWindow(
+            start_sample=self._start_sample,
+            source_sample_count=full_window.size,
+            sample_offsets=offsets,
+            voltages=full_window[offsets].copy(),
+        )
+        self.reset()
+        return window
+
+    def ingest(self, chunk: DataChunk) -> list[PlotWindow]:
+        values = np.asarray(chunk.voltages, dtype=np.float64).reshape(-1)
+        discontinuity = (
+            self._next_sample is not None
+            and chunk.start_sample != self._next_sample
+        )
+        if chunk.lost_samples or chunk.corrupted_samples or discontinuity:
+            self.reset()
+        if values.size == 0:
+            return []
+
+        windows: list[PlotWindow] = []
+        offset = 0
+        while offset < values.size:
+            absolute_sample = chunk.start_sample + offset
+            if self._start_sample is None:
+                self._start_sample = absolute_sample
+                self._next_sample = absolute_sample
+            if absolute_sample != self._next_sample:
+                self.reset()
+                self._start_sample = absolute_sample
+                self._next_sample = absolute_sample
+
+            take = min(
+                self.window_samples - self._sample_count,
+                values.size - offset,
+            )
+            self._parts.append(values[offset : offset + take])
+            self._sample_count += take
+            self._next_sample += take
+            offset += take
+            if self._sample_count == self.window_samples:
+                windows.append(self._finish_window())
+        return windows
+
+
+def min_max_plot_envelope(
+    sample_offsets: np.ndarray,
+    voltages: np.ndarray,
+    pixel_width: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce Canvas coordinates while retaining each pixel bucket's extrema."""
+    point_count = voltages.size
+    target_buckets = max(1, pixel_width)
+    if point_count <= target_buckets * 2:
+        return sample_offsets, voltages
+
+    bucket_size = math.ceil(point_count / target_buckets)
+    bucket_count = math.ceil(point_count / bucket_size)
+    padded_count = bucket_count * bucket_size
+    padded = np.full(padded_count, np.nan, dtype=np.float64)
+    padded[:point_count] = voltages
+    buckets = padded.reshape(bucket_count, bucket_size)
+
+    minima = np.nanargmin(buckets, axis=1)
+    maxima = np.nanargmax(buckets, axis=1)
+    first = np.minimum(minima, maxima)
+    second = np.maximum(minima, maxima)
+    starts = np.arange(bucket_count, dtype=np.int64) * bucket_size
+    indices = np.column_stack((starts + first, starts + second)).reshape(-1)
+    indices = indices[indices < point_count]
+    return sample_offsets[indices], voltages[indices]
 
 
 class DwfError(RuntimeError):
@@ -933,6 +1050,7 @@ class AcquisitionWorker(threading.Thread):
         state: SharedMonitorState,
         stop_event: threading.Event,
         logger: PulseLogger,
+        publish_plot_data: bool,
     ) -> None:
         super().__init__(name="LiveDAQ acquisition", daemon=True)
         self.source = source
@@ -940,6 +1058,7 @@ class AcquisitionWorker(threading.Thread):
         self.state = state
         self.stop_event = stop_event
         self.logger = logger
+        self.publish_plot_data = publish_plot_data
 
     def run(self) -> None:
         lost_total = 0
@@ -973,6 +1092,8 @@ class AcquisitionWorker(threading.Thread):
                 for pulse in pulses:
                     self.logger.log(pulse)
                     self.state.events.put(pulse)
+                if self.publish_plot_data:
+                    self.state.plot_chunks.put(chunk)
                 elapsed_s = (
                     (chunk.start_sample + len(chunk.voltages))
                     / self.source.sample_rate_hz
@@ -1251,7 +1372,7 @@ class LiveDAQWindow:
         elif batch_updated:
             self.result_var.set(
                 "\n".join(
-                    f"#{pulse.number:06d} | {pulse.peak_timestamp} | "
+                    f"#{pulse.number:06d} | {pulse.peak_timestamp[11:23]} | "
                     f"t={pulse.peak_elapsed_s:.6f} s | {pulse.polarity:8s} | "
                     f"A={pulse.amplitude_v * 1e3:+.3f} mV | "
                     f"Q={pulse.absolute_charge_fc:.3f} fC"
@@ -1276,7 +1397,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Continuously stream AD3 Channel 1, detect CR-110 charge pulses, "
-            "and show events in configurable GUI batches."
+            "and show consecutive waveform windows of a configurable duration."
         )
     )
     parser.add_argument("--simulate", action="store_true", help="Use a simulated 10 Hz source.")
@@ -1300,13 +1421,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pretrigger-ms", type=float, default=0.5)
     parser.add_argument("--posttrigger-ms", type=float, default=1.5)
-    parser.add_argument("--gui-rate", type=float, default=DEFAULT_GUI_RATE_HZ)
+    parser.add_argument(
+        "--gui-rate",
+        type=float,
+        default=DEFAULT_GUI_RATE_HZ,
+        help=(
+            "Accepted for script compatibility; the flat canvas rate is "
+            "determined by --canva-size."
+        ),
+    )
+    parser.add_argument(
+        "--canva-size",
+        dest="canva_size",
+        type=float,
+        default=DEFAULT_CANVA_SIZE_S,
+        help=(
+            "Duration in seconds of each non-overlapping canvas window and "
+            f"update interval (default: {DEFAULT_CANVA_SIZE_S:.3f})."
+        ),
+    )
     parser.add_argument(
         "--num-test",
         type=int,
         default=NUM_TEST,
         help=(
-            "Number of newly detected pulses displayed per GUI batch "
+            "Number of result rows replaced per non-overlapping GUI batch "
             f"(default: NUM_TEST={NUM_TEST})."
         ),
     )
@@ -1351,6 +1490,7 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         "--tau-us": args.tau_us,
         "--threshold-sigma": args.threshold_sigma,
         "--gui-rate": args.gui_rate,
+        "--canva-size": args.canva_size,
         "--simulation-pulse-rate": args.simulation_pulse_rate,
         "--simulation-charge-fc": args.simulation_charge_fc,
     }
@@ -1382,8 +1522,9 @@ def make_config(args: argparse.Namespace) -> LiveConfig:
         polarity=args.polarity,
         pretrigger_ms=args.pretrigger_ms,
         posttrigger_ms=args.posttrigger_ms,
-        gui_rate_hz=args.gui_rate,
+        gui_rate_hz=1.0 / args.canva_size,
         num_test=args.num_test,
+        canva_size=args.canva_size,
         wavegen_enabled=args.wavegen,
         wavegen_frequency_hz=args.wavegen_frequency,
         wavegen_vpp=args.wavegen_vpp,
@@ -1441,19 +1582,29 @@ def run_headless(
     return 1 if snapshot.error else 0
 
 
-class SinglePulseLiveDAQWindow(LiveDAQWindow):
-    """Show the newest waveform and replace result rows in complete batches."""
+class FlatLiveDAQWindow(LiveDAQWindow):
+    """Display fixed raw-waveform windows and independent result batches."""
 
     def __init__(
         self,
         state: SharedMonitorState,
         stop_event: threading.Event,
         worker: AcquisitionWorker,
-        gui_rate_hz: float,
         num_test: int,
+        canva_size: float,
     ) -> None:
-        super().__init__(state, stop_event, worker, gui_rate_hz, num_test)
-        self.latest_pulse: LivePulse | None = None
+        super().__init__(
+            state,
+            stop_event,
+            worker,
+            1.0 / canva_size,
+            num_test,
+        )
+        self.canva_size = canva_size
+        self.update_ms = max(20, round(canva_size * 1000))
+        self.plot_accumulator: ContinuousPlotAccumulator | None = None
+        self.latest_window: PlotWindow | None = None
+        self.recent_pulses: deque[LivePulse] = deque()
         self.pending_results: list[LivePulse] = []
         self.displayed_results: list[LivePulse] = []
         self.result_frame.configure(
@@ -1463,17 +1614,167 @@ class SinglePulseLiveDAQWindow(LiveDAQWindow):
             f"Waiting for {self.num_test} charge pulses... (0/{self.num_test})"
         )
 
+    def _draw_continuous_window(
+        self,
+        window: PlotWindow,
+        pulses: Sequence[LivePulse],
+        sample_rate_hz: float,
+    ) -> None:
+        canvas = self.canvas
+        canvas.delete("all")
+        width = max(100, canvas.winfo_width())
+        height = max(100, canvas.winfo_height())
+        left, right, top, bottom = 80, width - 20, 28, height - 48
+        plot_width = max(1, right - left)
+        plot_height = max(1, bottom - top)
+
+        for division in range(11):
+            x = left + plot_width * division / 10
+            canvas.create_line(x, top, x, bottom, fill="#263241")
+        for division in range(9):
+            y = top + plot_height * division / 8
+            canvas.create_line(left, y, right, y, fill="#263241")
+
+        voltages = window.voltages
+        if voltages.size == 0:
+            return
+        voltage_min = float(np.min(voltages))
+        voltage_max = float(np.max(voltages))
+        voltage_pad = max((voltage_max - voltage_min) * 0.12, 0.001)
+        voltage_min -= voltage_pad
+        voltage_max += voltage_pad
+
+        def x_of_offset(sample_offset: float) -> float:
+            denominator = max(1, window.source_sample_count - 1)
+            return left + sample_offset / denominator * plot_width
+
+        def y_of(voltage_v: float) -> float:
+            return bottom - (
+                (voltage_v - voltage_min)
+                / (voltage_max - voltage_min)
+                * plot_height
+            )
+
+        draw_offsets, draw_voltages = min_max_plot_envelope(
+            window.sample_offsets,
+            voltages,
+            round(plot_width),
+        )
+        x_values = (
+            left
+            + draw_offsets.astype(np.float64)
+            / max(1, window.source_sample_count - 1)
+            * plot_width
+        )
+        y_values = (
+            bottom
+            - (draw_voltages - voltage_min)
+            / (voltage_max - voltage_min)
+            * plot_height
+        )
+        coordinates = np.column_stack((x_values, y_values)).reshape(-1).tolist()
+        if len(coordinates) >= 4:
+            canvas.create_line(*coordinates, fill="#f4d03f", width=1.5)
+
+        colors = (
+            "#48c9b0",
+            "#5dade2",
+            "#af7ac5",
+            "#ec7063",
+            "#f5b041",
+            "#58d68d",
+            "#85c1e9",
+        )
+        for pulse_index, pulse in enumerate(pulses):
+            offset = pulse.peak_sample - window.start_sample
+            if offset < 0 or offset >= window.source_sample_count:
+                continue
+            color = colors[pulse_index % len(colors)]
+            peak_x = x_of_offset(offset)
+            peak_y = y_of(pulse.peak_voltage_v)
+            canvas.create_line(
+                peak_x,
+                top,
+                peak_x,
+                bottom,
+                fill=color,
+                dash=(3, 4),
+            )
+            canvas.create_oval(
+                peak_x - 3,
+                peak_y - 3,
+                peak_x + 3,
+                peak_y + 3,
+                fill=color,
+                outline="",
+            )
+            canvas.create_text(
+                peak_x + 4,
+                top + 12 + (pulse_index % 2) * 16,
+                anchor="nw",
+                fill=color,
+                text=f"#{pulse.number}",
+            )
+
+        start_s = window.start_sample / sample_rate_hz
+        end_s = (
+            window.start_sample + window.source_sample_count - 1
+        ) / sample_rate_hz
+        canvas.create_text(
+            left,
+            height - 18,
+            anchor="w",
+            fill="#cbd5e1",
+            text=f"{start_s:.6f} s",
+        )
+        canvas.create_text(
+            right,
+            height - 18,
+            anchor="e",
+            fill="#cbd5e1",
+            text=f"{end_s:.6f} s",
+        )
+        canvas.create_text(
+            8,
+            top,
+            anchor="nw",
+            fill="#cbd5e1",
+            text=f"{voltage_max * 1e3:.1f} mV",
+        )
+        canvas.create_text(
+            8,
+            bottom,
+            anchor="sw",
+            fill="#cbd5e1",
+            text=f"{voltage_min * 1e3:.1f} mV",
+        )
+        canvas.create_text(
+            (left + right) / 2,
+            height - 18,
+            fill="#cbd5e1",
+            text=(
+                "Continuous acquisition time "
+                f"(non-overlapping {self.canva_size:g} s window)"
+            ),
+        )
+
     def refresh(self) -> None:
         if self.closing:
             return
 
-        newest_pulse: LivePulse | None = None
+        snapshot = self.state.snapshot()
+        if self.plot_accumulator is None and snapshot.sample_rate_hz > 0.0:
+            self.plot_accumulator = ContinuousPlotAccumulator(
+                snapshot.sample_rate_hz,
+                self.canva_size,
+            )
+
         while True:
             try:
                 pulse = self.state.events.get_nowait()
             except queue.Empty:
                 break
-            newest_pulse = pulse
+            self.recent_pulses.append(pulse)
             self.pending_results.append(pulse)
 
         batch_updated = False
@@ -1482,21 +1783,59 @@ class SinglePulseLiveDAQWindow(LiveDAQWindow):
             del self.pending_results[: self.num_test]
             batch_updated = True
 
-        if newest_pulse is not None:
-            self.latest_pulse = newest_pulse
-            self._draw_waveforms((newest_pulse,))
+        latest_complete_window: PlotWindow | None = None
+        while True:
+            try:
+                chunk = self.state.plot_chunks.get_nowait()
+            except queue.Empty:
+                break
+            if self.plot_accumulator is None:
+                continue
+            completed = self.plot_accumulator.ingest(chunk)
+            if completed:
+                latest_complete_window = completed[-1]
 
-        snapshot = self.state.snapshot()
+        if latest_complete_window is not None:
+            self.latest_window = latest_complete_window
+            window_end = (
+                latest_complete_window.start_sample
+                + latest_complete_window.source_sample_count
+            )
+            while (
+                self.recent_pulses
+                and self.recent_pulses[0].peak_sample
+                < latest_complete_window.start_sample
+            ):
+                self.recent_pulses.popleft()
+            window_pulses = tuple(
+                pulse
+                for pulse in self.recent_pulses
+                if latest_complete_window.start_sample
+                <= pulse.peak_sample
+                < window_end
+            )
+            self._draw_continuous_window(
+                latest_complete_window,
+                window_pulses,
+                snapshot.sample_rate_hz,
+            )
+
         warning = ""
         if snapshot.lost_samples or snapshot.corrupted_samples:
             warning = "  DATA WARNING"
+        plot_progress = (
+            self.plot_accumulator.pending_fraction
+            if self.plot_accumulator is not None
+            else 0.0
+        )
         self.status_var.set(
             f"{snapshot.status} | {snapshot.source_name} | "
             f"{snapshot.sample_rate_hz / 1e3:.3f} kS/s | "
             f"elapsed {snapshot.elapsed_s:.2f} s | events {snapshot.event_count} | "
             f"lost {snapshot.lost_samples} | "
             f"corrupted {snapshot.corrupted_samples} | "
-            f"noise {snapshot.noise_sigma_v * 1e3:.3f} mV{warning}"
+            f"noise {snapshot.noise_sigma_v * 1e3:.3f} mV | "
+            f"next canvas {plot_progress * 100:.0f}%{warning}"
         )
         self.output_var.set(f"Output: {snapshot.output_directory}")
         self.result_frame.configure(
@@ -1511,7 +1850,7 @@ class SinglePulseLiveDAQWindow(LiveDAQWindow):
         elif batch_updated:
             self.result_var.set(
                 "\n".join(
-                    f"#{pulse.number:06d} | {pulse.peak_timestamp} | "
+                    f"#{pulse.number:06d} | {pulse.peak_timestamp[11:23]} | "
                     f"t={pulse.peak_elapsed_s:.6f} s | {pulse.polarity:8s} | "
                     f"A={pulse.amplitude_v * 1e3:+.3f} mV | "
                     f"Q={pulse.absolute_charge_fc:.3f} fC"
@@ -1559,18 +1898,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         source = DwfAD3Source(config, args.device_index, args.dwf_library)
 
-    worker = AcquisitionWorker(source, config, state, stop_event, logger)
+    worker = AcquisitionWorker(
+        source,
+        config,
+        state,
+        stop_event,
+        logger,
+        publish_plot_data=not args.headless,
+    )
     worker.start()
     if args.headless:
         return run_headless(state, stop_event, worker, args.duration)
 
     try:
-        window = SinglePulseLiveDAQWindow(
+        window = FlatLiveDAQWindow(
             state,
             stop_event,
             worker,
-            args.gui_rate,
             args.num_test,
+            args.canva_size,
         )
         if args.duration:
             window.root.after(round(args.duration * 1000), window.request_stop)

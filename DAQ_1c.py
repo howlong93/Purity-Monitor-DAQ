@@ -19,7 +19,7 @@ from typing import Iterable, Sequence
 
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
-DEFAULT_INPUT = SCRIPT_DIRECTORY / "AD3 results" / "csv"
+DEFAULT_INPUT = SCRIPT_DIRECTORY / "results" / "csv"
 DEFAULT_GAIN_V_PER_PC = 1.4
 DEFAULT_TAU_US = 140.0
 
