@@ -73,14 +73,14 @@ The 500 kS/s result is a demonstrated operating point for the tested computer, U
 
 ## Clone, installation, and path portability
 
-If using Git, clone the repository and enter the DAQ folder:
+Clone the repository and enter the repository root:
 
 ```bash
 git clone https://github.com/howlong93/Purity-Monitor-DAQ.git
 cd Purity-Monitor-DAQ
 ```
 
-If SLAC provides only the standalone `DAQ_system` folder, open a terminal in that folder instead. Everything required from this repository—including `requirements.txt`, scripts, source files, and documentation—is located inside it.
+Unless stated otherwise, run the commands in this README from the repository root.
 
 ### Software
 
@@ -116,8 +116,8 @@ No source-code path should need to be edited after cloning or copying the folder
 - Python resolves default input and output locations relative to each source file.
 - Timestamped output directories are created automatically under `results/`.
 - Shell scripts locate their own directory before launching Python, so they can be called from another working directory.
-- Spaces in the parent path are supported by the supplied scripts.
-- The clone or copied folder must be writable when saving is enabled.
+- The repository can be located in a path containing spaces.
+- The repository root must be writable when saving is enabled.
 
 On Windows, the programs automatically search the standard DWF locations:
 
@@ -163,7 +163,7 @@ Display reduction affects only plotting. Pulse detection still processes the acq
 
 ## First simulation and success criteria
 
-Open a terminal in the supplied `DAQ_system` directory. The safest first test is the one-channel non-flat simulation:
+Open a terminal in the repository root. The safest first test is the one-channel non-flat simulation:
 
 ```bash
 python LiveDAQ_1c.py \
@@ -482,7 +482,7 @@ python LiveDAQ_2c_flat.py \
 
 Saving is enabled by default unless `--no-save` is present. Each run creates a timestamped subdirectory.
 
-The parent and timestamped directories are created automatically; no absolute output path needs to be edited after cloning. The `DAQ_system` folder must be writable when saving is enabled.
+The parent and timestamped directories are created automatically; no absolute output path needs to be edited after cloning. The repository root must be writable when saving is enabled.
 
 | Program family | Default parent directory | Summary | Optional waveform file |
 |---|---|---|---|
@@ -618,7 +618,5 @@ Every continued command line must end with `\` as its final character. Remove tr
 
 - [`docs/notes_1c.md`](docs/notes_1c.md): detailed one-channel architecture, performance history, detector logic, and troubleshooting.
 - [`docs/notes_2c.md`](docs/notes_2c.md): detailed two-channel architecture, pairing, validation status, calibration plan, limitations, and laboratory test sequence.
-
-Additional detector-design notes, hardware datasheets, and purity-monitor references may be distributed separately. They are not required to run the DAQ software and are intentionally not linked here so this `DAQ_system` folder remains self-contained.
 
 For a new user, read this README first, run a simulation, then read the channel-specific engineering notes before connecting detector hardware.

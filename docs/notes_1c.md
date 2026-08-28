@@ -164,7 +164,7 @@ The offline algorithm predates the current live vectorized detector and is not n
 
 ### 3.4 Shell scripts
 
-Files under DAQ_system/scripts are editable launch examples, not permanent experiment configuration.
+Files under `scripts/` are editable launch examples, not permanent experiment configuration.
 
 - [run_monitor.sh](../scripts/run_monitor.sh) runs [LiveDAQ_1c.py](../LiveDAQ_1c.py) with an external stimulus or detector and keeps W1 disabled.
 - [run_wavegen.sh](../scripts/run_wavegen.sh) runs [LiveDAQ_1c.py](../LiveDAQ_1c.py) and enables W1.
@@ -182,7 +182,7 @@ Required for all live modes:
 - NumPy
 - Tkinter for GUI mode
 
-From the `DAQ_system` directory, install the pip-managed dependency from [requirements.txt](../requirements.txt):
+From the repository root, install the pip-managed dependency from [requirements.txt](../requirements.txt):
 
     python -m pip install -r requirements.txt
 
@@ -209,11 +209,11 @@ If WaveForms Device Manager shows only DEMO devices, close WaveForms, connect th
 
 ### 4.3 Working directory
 
-The shell scripts change into their own directory before launching Python, so they can be run from another location. When entering commands manually, run them from DAQ_system/scripts or adjust the relative path.
+The shell scripts locate their own directory before launching Python, so they can be run from any working directory. When entering Python commands manually, run them from the repository root or adjust the relative path.
 
 The DAQ folder includes a [.gitattributes](../.gitattributes) rule that forces all `.sh` files to use LF line endings after checkout, including on Windows. The scripts are also stored with the Git executable bit, so Linux and macOS users can invoke them directly. On Windows, use Git Bash or another Bash environment.
 
-From the `DAQ_system` directory, either form is valid on Linux/macOS:
+From the repository root, either form is valid on Linux/macOS:
 
     ./scripts/run_simulate.sh
 
@@ -590,9 +590,9 @@ The historical `--canva-pulse` and `--canvas-pulse` names are no longer accepted
 
 ## 13. Output files
 
-Unless `--no-save` is present, each run creates a timestamped directory under `DAQ_system/results/live/`:
+Unless `--no-save` is present, each run creates a timestamped directory under `results/live/`:
 
-    DAQ_system/results/live/
+    results/live/
 
 ### `run_config.json`
 

@@ -16,9 +16,7 @@
 
 **Primary files:** [`LiveDAQ_2c.py`](../LiveDAQ_2c.py) | [`LiveDAQ_2c_flat.py`](../LiveDAQ_2c_flat.py) | [`run_2c_simulate.sh`](../scripts/run_2c_simulate.sh)
 
-**Related documentation:** [`notes_1c.md`](notes_1c.md) | [`Parameter_Reference.md`](../../Parameter_Reference.md) | [`design_notes.md`](../../design_notes.md) | [`design_concerns.md`](../../design_concerns.md)
-
-**Technical references:** [Vyara thesis](../../paper/Vyara_Thesis_Final.pdf) | [CR-110-R2 datasheet](../../datasheets/CR-110-R2_datasheet.pdf) | [Thesis reference notes](../../ref_note_from_thesis.md)
+**Related documentation:** [`notes_1c.md`](notes_1c.md)
 
 ---
 
@@ -60,7 +58,7 @@ The immediate goals are to:
 
 The current programs are an engineering prototype for acquisition, detection, pairing, and live monitoring. They do **not** yet implement the final physics-grade purity analysis.
 
-In particular, the current online `Qc` and `Qa` values are derived from peak amplitude and nominal CR-110 gain. The [Vyara thesis](../../paper/Vyara_Thesis_Final.pdf) analysis instead relates charge to the waveform integral and uses waveform models to handle the finite current duration, CSP response, and the unexpected anode bump. This distinction is essential.
+In particular, the current online `Qc` and `Qa` values are derived from peak amplitude and nominal CR-110 gain. A physics-grade analysis may instead need waveform integration or model fitting to account for finite current duration, CSP response, and the unexpected anode bump. This distinction is essential.
 
 ---
 
@@ -475,7 +473,7 @@ The retained data are for display only. Detection operates on the full acquired 
 
 ## 9. Command-line examples
 
-Run commands from `DAQ_system/scripts`, from `DAQ_system`, or use absolute paths as appropriate.
+Run commands from the repository root unless an example states otherwise.
 
 ### 9.1 Non-flat simulation
 
@@ -568,13 +566,13 @@ Headless simulation does not validate GUI performance or physical DWF transfer.
 Non-flat:
 
 ```text
-DAQ_system/results/live_2c/<run timestamp>/
+results/live_2c/<run timestamp>/
 ```
 
 Flat:
 
 ```text
-DAQ_system/results/live_2c_flat/<run timestamp>/
+results/live_2c_flat/<run timestamp>/
 ```
 
 Use `--output-root` to change the parent directory. Use `--no-save` to disable output.
@@ -749,7 +747,7 @@ Measure:
 
 ## 13. Calibration required for detector operation
 
-Use the repository's [`Parameter_Reference.md`](../../Parameter_Reference.md), [`design_notes.md`](../../design_notes.md), and [`design_concerns.md`](../../design_concerns.md) alongside the procedures below. Those files contain the broader detector requirements and electronics context; this section focuses on calibration required by the two-channel DAQ.
+This section focuses on the calibration required by the two-channel DAQ.
 
 ### 13.1 Separate channel gain calibration
 
