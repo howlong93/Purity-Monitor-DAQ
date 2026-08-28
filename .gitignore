@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Local environments and editor state
+.venv/
+venv/
+.vscode/
+.idea/
+
+# Runtime measurement output
+results/
+
+# Local development notes not part of the distributed DAQ
+prompts.md
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db

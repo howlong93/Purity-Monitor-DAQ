@@ -1,0 +1,6 @@
+# Runtime requirement for the DAQ Python programs.
+# Python 3.10 or newer is required by the source syntax.
+numpy>=1.24
+
+# Tkinter is part of the Python installation rather than a pip package.
+# Hardware mode also requires Digilent WaveForms and its DWF SDK/library.

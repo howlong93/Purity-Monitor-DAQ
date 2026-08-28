@@ -178,13 +178,15 @@ Files under DAQ_system/scripts are editable launch examples, not permanent exper
 
 Required for all live modes:
 
-- Python 3
+- Python 3.10 or newer
 - NumPy
 - Tkinter for GUI mode
 
-Install NumPy if needed:
+From the `DAQ_system` directory, install the pip-managed dependency from [requirements.txt](../requirements.txt):
 
-    python -m pip install numpy
+    python -m pip install -r requirements.txt
+
+Tkinter is supplied by the Python installation and is therefore not listed as a pip dependency. On Linux, it may need to be installed through the operating system package manager.
 
 Hardware mode additionally requires:
 
@@ -208,6 +210,18 @@ If WaveForms Device Manager shows only DEMO devices, close WaveForms, connect th
 ### 4.3 Working directory
 
 The shell scripts change into their own directory before launching Python, so they can be run from another location. When entering commands manually, run them from DAQ_system/scripts or adjust the relative path.
+
+The DAQ folder includes a [.gitattributes](../.gitattributes) rule that forces all `.sh` files to use LF line endings after checkout, including on Windows. The scripts are also stored with the Git executable bit, so Linux and macOS users can invoke them directly. On Windows, use Git Bash or another Bash environment.
+
+From the `DAQ_system` directory, either form is valid on Linux/macOS:
+
+    ./scripts/run_simulate.sh
+
+or:
+
+    bash scripts/run_simulate.sh
+
+On Windows with Git Bash, the second form is the most portable.
 
 ---
 

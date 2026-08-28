@@ -4,24 +4,27 @@ Live data acquisition and monitoring for CR-150/CR-110 charge-sensitive preampli
 
 This README is the practical starting point for detector users. Detailed engineering notes are available in [`docs/notes_1c.md`](docs/notes_1c.md) and [`docs/notes_2c.md`](docs/notes_2c.md).
 
-> **Current status:** Simulation is available for every live program. The two-channel programs still require validation with the physical AD3, two CR-110 readout chains, and the purity monitor. Displayed charge currently uses the nominal CR-110 gain and is not yet a detector-calibrated physics result.
+> **Current status:** Simulation is available for every live program. Both optimized one-channel GUI variants have sustained 500 kS/s on the physical AD3 with `lost 0` and `corrupted 0` under the tested laboratory configuration. The two-channel programs still require validation with the physical AD3, two CR-110 readout chains, and the purity monitor. Displayed charge currently uses the nominal CR-110 gain and is not yet a detector-calibrated physics result.
 
 ## Contents
 
-1. [Purpose and architecture](#purpose-and-architecture)
-2. [Requirements](#requirements)
+1. [System overview and validation status](#system-overview-and-validation-status)
+2. [Clone, installation, and path portability](#clone-installation-and-path-portability)
 3. [Choose a program](#choose-a-program)
-4. [Quick start](#quick-start)
-5. [Example scripts](#example-scripts)
-6. [Arguments common to all four live programs](#arguments-common-to-all-four-live-programs)
-7. [Program-specific arguments](#program-specific-arguments)
-8. [Output files](#output-files)
-9. [Operating notes](#operating-notes)
-10. [Further documentation](#further-documentation)
+4. [First simulation and success criteria](#first-simulation-and-success-criteria)
+5. [First hardware run](#first-hardware-run)
+6. [Stopping a run and CLI help](#stopping-a-run-and-cli-help)
+7. [Example scripts](#example-scripts)
+8. [Arguments common to all four live programs](#arguments-common-to-all-four-live-programs)
+9. [Program-specific arguments](#program-specific-arguments)
+10. [Output files](#output-files)
+11. [Operating notes](#operating-notes)
+12. [Common troubleshooting](#common-troubleshooting)
+13. [Further documentation](#further-documentation)
 
 ---
 
-## Purpose and architecture
+## System overview and validation status
 
 The DAQ continuously reads one or two CR-110 outputs through the AD3, learns the background noise, detects charge pulses, displays live waveforms, and optionally saves numerical results.
 
@@ -57,9 +60,27 @@ AD3 Record acquisition or simulation
 
 The two-channel versions add independent detection for each channel and pair cathode/anode pulses by their peak-time separation.
 
+### Validated operating points
+
+- One-channel non-flat: physical AD3 operation demonstrated at 500 kS/s with `lost 0` and `corrupted 0`.
+- One-channel flat: physical AD3 operation demonstrated at 500 kS/s with `lost 0` and `corrupted 0`.
+- Two-channel simulation: available for both GUI styles.
+- Two-channel physical hardware: not yet validated with the complete purity monitor.
+
+The 500 kS/s result is a demonstrated operating point for the tested computer, USB connection, script parameters, and output settings. Recheck the integrity counters after changing any of those conditions.
+
 ---
 
-## Requirements
+## Clone, installation, and path portability
+
+If using Git, clone the repository and enter the DAQ folder:
+
+```bash
+git clone https://github.com/howlong93/Purity-Monitor-DAQ.git
+cd Purity-Monitor-DAQ
+```
+
+If SLAC provides only the standalone `DAQ_system` folder, open a terminal in that folder instead. Everything required from this repository—including `requirements.txt`, scripts, source files, and documentation—is located inside it.
 
 ### Software
 
@@ -69,13 +90,15 @@ The two-channel versions add independent detection for each channel and pair cat
 - Digilent WaveForms with the WaveForms SDK for physical AD3 operation.
 - Bash for the supplied `.sh` scripts. On Windows, Git Bash is suitable.
 
-Install NumPy if necessary:
+Install the pip-managed dependency from [`requirements.txt`](requirements.txt):
 
 ```bash
-python -m pip install numpy
+python -m pip install -r requirements.txt
 ```
 
 Simulation does not require an AD3 or the WaveForms SDK.
+
+Tkinter is installed with the standard Windows Python distribution but is not a pip package. On Linux, install the operating system's Tkinter package if GUI startup reports that it is missing.
 
 ### Before using physical hardware
 
@@ -85,6 +108,31 @@ Simulation does not require an AD3 or the WaveForms SDK.
 4. Verify BNC Adapter coupling, attenuation, grounding, and signal polarity.
 5. Verify that the requested AD3 input range will not clip the signal.
 6. Leave W1 disabled during detector operation. It is enabled only with `--wavegen`.
+
+### Path portability
+
+No source-code path should need to be edited after cloning or copying the folder:
+
+- Python resolves default input and output locations relative to each source file.
+- Timestamped output directories are created automatically under `results/`.
+- Shell scripts locate their own directory before launching Python, so they can be called from another working directory.
+- Spaces in the parent path are supported by the supplied scripts.
+- The clone or copied folder must be writable when saving is enabled.
+
+On Windows, the programs automatically search the standard DWF locations:
+
+```text
+C:\Program Files\Digilent\WaveForms3\dwf.dll
+C:\Program Files (x86)\Digilent\WaveForms3\dwf.dll
+```
+
+macOS and Linux use the normal WaveForms framework/shared-library locations. Only a nonstandard installation requires an explicit path:
+
+```bash
+python LiveDAQ_1c.py --dwf-library "D:/custom/path/dwf.dll"
+```
+
+The supplied `.sh` files use LF line endings and are stored with the Git executable bit. On Windows, run them through Git Bash. On Linux/macOS, either `./scripts/script_name.sh` or `bash scripts/script_name.sh` is valid.
 
 ---
 
@@ -113,15 +161,9 @@ Display reduction affects only plotting. Pulse detection still processes the acq
 
 ---
 
-## Quick start
+## First simulation and success criteria
 
-Open a terminal in the downloaded `DAQ_system` directory:
-
-```bash
-cd DAQ_system
-```
-
-### Safest first test: one-channel simulation
+Open a terminal in the supplied `DAQ_system` directory. The safest first test is the one-channel non-flat simulation:
 
 ```bash
 python LiveDAQ_1c.py \
@@ -132,6 +174,35 @@ python LiveDAQ_1c.py \
   --canva-size 1 \
   --no-save
 ```
+
+A successful first run should show all of the following:
+
+1. The GUI opens without a Python import error.
+2. The status changes from `Learning noise (1 s warm-up)` to `Running`.
+3. Simulated pulses appear at approximately the configured event rate.
+4. Reconstructed charge is near the configured `--simulation-charge-fc` value.
+5. The status remains `lost 0` and `corrupted 0`.
+6. Clicking **Stop** closes the acquisition worker cleanly.
+
+If this test fails, resolve the software environment before connecting hardware.
+
+### One-channel continuous-time simulation
+
+Use the flat version to verify continuous non-overlapping waveform windows:
+
+```bash
+python LiveDAQ_1c_flat.py \
+  --simulate \
+  --sample-rate 200000 \
+  --simulation-charge-fc 100 \
+  --min-charge-fc 40 \
+  --polarity positive \
+  --canva-size 0.500 \
+  --num-test 10 \
+  --no-save
+```
+
+Here `--canva-size 0.500` means a 0.5-second waveform window and a 0.5-second canvas update interval.
 
 ### Two-channel event simulation
 
@@ -162,9 +233,27 @@ python LiveDAQ_2c_flat.py \
   --no-save
 ```
 
-### One-channel hardware template
+Simulation verifies software behavior. It does not prove that a physical AD3, USB connection, or computer can sustain the requested sampling rate.
 
-Close WaveForms, connect the CR-110 output to AD3 Channel 1, then run:
+---
+
+## First hardware run
+
+### Pre-run checklist
+
+1. Close the WaveForms desktop application.
+2. Connect the AD3 and confirm its USB/power state.
+3. Connect the intended CR-110 output to the correct AD3 channel.
+4. Verify common ground, BNC Adapter coupling/attenuation, input range, and expected polarity.
+5. Close the metal enclosure and keep sensitive wiring short.
+6. Start with `--no-save` so disk output cannot affect the first throughput check.
+7. Use a previously validated sampling rate before attempting a higher rate.
+8. Wait for the one-second noise-learning period to finish.
+9. Confirm the pulse polarity, amplitude, and approximate charge scale.
+10. Require `lost 0` and `corrupted 0` throughout the run.
+11. Enable summary or waveform saving only after a clean no-save test.
+
+### One-channel non-flat hardware template
 
 ```bash
 python LiveDAQ_1c.py \
@@ -172,14 +261,30 @@ python LiveDAQ_1c.py \
   --input-range 1.0 \
   --min-charge-fc 40 \
   --polarity positive \
-  --canva-size 1
+  --canva-size 1 \
+  --no-save
 ```
 
-Adjust polarity and threshold to the measured hardware signal.
+Adjust `--polarity`, `--min-charge-fc`, and `--input-range` to the measured hardware signal. Both optimized one-channel GUI variants have already sustained 500 kS/s without DWF integrity errors in the tested setup, but a new computer or configuration must be checked again.
+
+### One-channel flat hardware template
+
+```bash
+python LiveDAQ_1c_flat.py \
+  --sample-rate 200000 \
+  --input-range 1.0 \
+  --min-charge-fc 40 \
+  --polarity positive \
+  --canva-size 0.500 \
+  --num-test 10 \
+  --no-save
+```
+
+Use this version when the continuous baseline and the intervals between pulses are important.
 
 ### Two-channel hardware template
 
-Close WaveForms, connect cathode output to Channel 1 and anode output to Channel 2, then run:
+Close WaveForms, connect the cathode output to Channel 1 and the anode output to Channel 2, then run:
 
 ```bash
 python LiveDAQ_2c_flat.py \
@@ -190,23 +295,40 @@ python LiveDAQ_2c_flat.py \
   --drift-time-us 55 \
   --drift-window-us 15 \
   --min-charge-fc 40 \
-  --canva-size 0.500
+  --canva-size 0.500 \
+  --no-save
 ```
 
-The current `55 +/- 15 us` pairing rule is provisional. Determine the correct timing from physical data before using pairing for production analysis.
+The current `55 +/- 15 us` pairing rule is provisional. Determine the correct timing from physical data before using pairing for production analysis. Two-channel physical throughput and pairing still require validation.
 
-### Stop a run
+### Offline WaveForms CSV analysis
+
+Place exported CSV files under `results/csv/` or pass an explicit file/directory path:
+
+```bash
+python DAQ_1c.py results/csv \
+  --min-charge-fc 40 \
+  --polarity positive \
+  --output-dir results/offline_charge
+```
+
+The input CSV directory is not created with measurement data automatically; the user must supply the exported files.
+
+---
+
+## Stopping a run and CLI help
 
 - GUI mode: click **Stop** and allow the acquisition worker to close safely.
 - Headless mode: press `Ctrl+C`.
-- Use `--duration N` to stop automatically after `N` wall-clock seconds.
+- Add `--duration N` to stop automatically after `N` wall-clock seconds.
 
-### See the authoritative CLI help
-
-For any program:
+For authoritative options and defaults, run:
 
 ```bash
+python LiveDAQ_1c.py --help
+python LiveDAQ_1c_flat.py --help
 python LiveDAQ_2c.py --help
+python LiveDAQ_2c_flat.py --help
 ```
 
 The program's `--help` output is authoritative if the code and README ever differ.
@@ -232,6 +354,12 @@ bash scripts/run_simulate.sh
 | [`scripts/run_2c_monitor.sh`](scripts/run_2c_monitor.sh) | Initial two-channel purity-monitor hardware run without W1 or waveform-CSV overhead |
 
 Scripts are examples, not fixed experimental configurations. Open the relevant script and copy or adjust its arguments for a new run.
+
+On Linux/macOS, the executable bit is stored in Git, so a script can also be launched directly:
+
+```bash
+./scripts/run_simulate.sh
+```
 
 ---
 
@@ -354,6 +482,8 @@ python LiveDAQ_2c_flat.py \
 
 Saving is enabled by default unless `--no-save` is present. Each run creates a timestamped subdirectory.
 
+The parent and timestamped directories are created automatically; no absolute output path needs to be edited after cloning. The `DAQ_system` folder must be writable when saving is enabled.
+
 | Program family | Default parent directory | Summary | Optional waveform file |
 |---|---|---|---|
 | 1c non-flat and flat | `results/live/` | `pulses.csv` | `pulse_waveforms.csv` |
@@ -407,16 +537,88 @@ The Python programs do not configure physical AC/DC coupling on the BNC Adapter.
 
 `--wavegen` enables AD3 W1. Use it only for a planned electronics bench test. Do not connect or enable W1 as part of normal detector acquisition unless the setup has been explicitly reviewed.
 
+### Square-wave edge counting
+
+A square wave contains a rising edge and a falling edge. With `--polarity both`, one generator cycle may produce one positive and one negative detected pulse. Select `--polarity positive` or `--polarity negative` when only one edge per cycle should be counted.
+
+---
+
+## Common troubleshooting
+
+### WaveForms shows only a DEMO device
+
+Close WaveForms, connect and power the AD3, then reopen WaveForms. During initial setup, starting the application before connecting the device caused only the DEMO entry to appear.
+
+### Python cannot open the AD3
+
+- Close the WaveForms desktop application so it releases exclusive device ownership.
+- Verify USB and power.
+- Confirm that WaveForms and the DWF SDK are installed.
+- Use `--device-index` when multiple devices are attached.
+- Use `--dwf-library` only when DWF is installed outside the standard location.
+
+### The program remains at `Learning noise`
+
+- Wait for at least one second of acquired sample time.
+- Confirm that elapsed acquisition time is increasing.
+- Check whether repeated lost samples are resetting the detector.
+- Restart after correcting a DWF/device error.
+
+### The program remains at `Waiting for a charge pulse`
+
+- Verify the input channel and common ground.
+- Check BNC Adapter coupling/attenuation.
+- Verify `--polarity` or the channel-specific 2c polarity arguments.
+- Lower `--min-charge-fc` carefully.
+- Confirm that the signal is not clipped by `--input-range`.
+
+### Too many pulses are detected
+
+- Determine whether both square-wave edges are being counted.
+- Select one polarity.
+- Increase `--min-charge-fc` gradually.
+- Correct shielding, grounding, and mains pickup before relying only on a higher software threshold.
+
+### A pulse is visible but has no marker
+
+- Verify polarity and threshold.
+- Lower `--min-charge-fc` temporarily.
+- Increase sample rate only while `lost` and `corrupted` remain zero.
+- See the detector-threshold discussion in [`docs/notes_1c.md`](docs/notes_1c.md).
+
+### `DATA WARNING`, lost, or corrupted becomes nonzero
+
+1. Stop the run and do not treat it as production-quality data.
+2. Restart with `--no-save`.
+3. Use headless or non-flat mode to isolate GUI cost.
+4. Close unnecessary applications and verify USB.
+5. Reduce the sampling rate if necessary.
+6. Re-enable saving only after a clean test.
+
+### The GUI becomes unresponsive
+
+- Stop any stale Python DAQ processes before launching another run.
+- Confirm that flat implementations contain the min/max Canvas envelope optimization.
+- Use `--headless` to determine whether acquisition/detection remains healthy without Tkinter.
+- Use a shorter flat `--canva-size` or non-flat mode when continuous context is unnecessary.
+
+### Bash reports an option as a command
+
+Every continued command line must end with `\` as its final character. Remove trailing spaces or tabs after a continuation backslash.
+
+### `--canva-size` is rejected
+
+- `LiveDAQ_1c.py` requires a positive integer pulse count, such as `--canva-size 5`.
+- Flat programs require a positive duration in seconds, such as `--canva-size 0.500`.
+- `LiveDAQ_2c.py` does not use `--canva-size` because its canvas updates when a completed pair arrives.
+
 ---
 
 ## Further documentation
 
 - [`docs/notes_1c.md`](docs/notes_1c.md): detailed one-channel architecture, performance history, detector logic, and troubleshooting.
 - [`docs/notes_2c.md`](docs/notes_2c.md): detailed two-channel architecture, pairing, validation status, calibration plan, limitations, and laboratory test sequence.
-- [`../Parameter_Reference.md`](../Parameter_Reference.md): detector, electronics, charge, timing, and operating parameter reference.
-- [`../design_notes.md`](../design_notes.md): broader readout-system goals and current project direction.
-- [`../design_concerns.md`](../design_concerns.md): electronics and system design risks.
-- [`../datasheets/CR-110-R2_datasheet.pdf`](../datasheets/CR-110-R2_datasheet.pdf): CR-110-R2 hardware reference.
-- [`../paper/Vyara_Thesis_Final.pdf`](../paper/Vyara_Thesis_Final.pdf): purity-monitor waveform, timing, charge-analysis, and hardware reference.
+
+Additional detector-design notes, hardware datasheets, and purity-monitor references may be distributed separately. They are not required to run the DAQ software and are intentionally not linked here so this `DAQ_system` folder remains self-contained.
 
 For a new user, read this README first, run a simulation, then read the channel-specific engineering notes before connecting detector hardware.
