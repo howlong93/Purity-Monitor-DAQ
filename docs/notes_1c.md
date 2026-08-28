@@ -10,28 +10,30 @@
 
 **Document status:** Updated for the current optimized non-flat and flat programs
 
-**Validation status:** Simulation is working for both GUI variants. Physical AD3 operation at 200 kS/s and above still requires laboratory validation.
+**Validation status:** Simulation is working for both GUI variants. The current non-flat and flat programs have both been validated with the physical AD3 at 500 kS/s without lost or corrupted samples under the tested laboratory configuration.
+
+**Related documentation:** [Two-channel DAQ engineering notes](notes_2c.md)
 
 ## Contents
 
-1. Purpose and scope
-2. Hardware and signal assumptions
-3. Current software inventory
-4. Requirements and device access
-5. Recommended commands
-6. Live architecture
-7. AD3 and DWF acquisition
-8. Lost and corrupted samples
-9. Noise estimation
-10. Pulse detection and charge calculation
-11. GUI implementations
-12. Command-line parameters
-13. Output files
-14. Problems encountered and current solutions
-15. Validation status
-16. Known limitations and future work
-17. Troubleshooting
-18. Handoff checklist
+1. [Purpose and scope](#1-purpose-and-scope)
+2. [Hardware and signal assumptions](#2-hardware-and-signal-assumptions)
+3. [Current software inventory](#3-current-software-inventory)
+4. [Requirements and device access](#4-requirements-and-device-access)
+5. [Recommended commands](#5-recommended-commands)
+6. [Live architecture](#6-live-architecture)
+7. [AD3 and DWF acquisition](#7-ad3-and-dwf-acquisition)
+8. [Lost and corrupted samples](#8-lost-and-corrupted-samples)
+9. [Noise estimation](#9-noise-estimation)
+10. [Pulse detection and charge calculation](#10-pulse-detection-and-charge-calculation)
+11. [GUI implementations](#11-gui-implementations)
+12. [Command-line parameters](#12-command-line-parameters)
+13. [Output files](#13-output-files)
+14. [Problems encountered and current solutions](#14-problems-encountered-and-current-solutions)
+15. [Validation status](#15-validation-status)
+16. [Known limitations and future work](#16-known-limitations-and-future-work)
+17. [Troubleshooting](#17-troubleshooting)
+18. [Handoff checklist](#18-handoff-checklist)
 
 ---
 
@@ -100,7 +102,7 @@ A square wave contains a rising and a falling edge. With --polarity both, one ge
 
 ## 3. Current software inventory
 
-### 3.1 LiveDAQ_1c.py — primary non-flat live DAQ
+### 3.1 [LiveDAQ_1c.py](../LiveDAQ_1c.py) — primary non-flat live DAQ
 
 This is the primary one-channel live program and the recommended starting point for normal operation.
 
@@ -118,24 +120,24 @@ Features:
 - Optional CSV summary and pulse-waveform output.
 - GUI and headless operation.
 
-The canvas batch is controlled by --canva-size with a positive integer. For example, --canva-size 5 waits for five new pulses and then overlays those five captures. The next canvas update uses the next five pulses; it is not a sliding window.
+The canvas batch is controlled by `--canva-size` with a positive integer. For example, `--canva-size 5` waits for five new pulses and then overlays those five captures. The next canvas update uses the next five pulses; it is not a sliding window.
 
-The result table is controlled independently by --num-test and defaults to ten rows.
+The result table is controlled independently by `--num-test` and defaults to ten rows.
 
-### 3.2 LiveDAQ_1c_flat.py — continuous-time diagnostic DAQ
+### 3.2 [LiveDAQ_1c_flat.py](../LiveDAQ_1c_flat.py) — continuous-time diagnostic DAQ
 
 This program uses the same current vectorized detector core but displays consecutive raw Channel 1 time intervals.
 
 Features specific to flat mode:
 
-- --canva-size is a positive floating-point duration in seconds.
-- --canva-size 0.500 displays a 0.5-second interval and updates every 0.5 seconds.
+- `--canva-size` is a positive floating-point duration in seconds.
+- `--canva-size 0.500` displays a 0.5-second interval and updates every 0.5 seconds.
 - Time intervals are consecutive and non-overlapping.
 - Each completed interval retains at most 50,000 samples for plotting, independent of the acquisition rate.
 - At lower rates, all samples are retained when the interval contains fewer than 50,000 samples.
 - Before calling Tk Canvas, a vectorized min/max envelope reduces the retained samples to approximately two display points per horizontal pixel.
 - The min/max envelope preserves narrow positive and negative excursions better than simple every-Nth-point drawing.
-- The result table still updates independently in complete batches of --num-test pulses.
+- The result table still updates independently in complete batches of `--num-test` pulses.
 - Plot data is not published in headless mode.
 
 Examples at the default 0.5-second canvas duration:
@@ -148,7 +150,7 @@ Examples at the default 0.5-second canvas duration:
 
 If DWF reports lost/corrupted data or the sample indices are discontinuous, an incomplete flat interval is discarded. The next canvas begins after the gap instead of drawing a false continuous line across missing data.
 
-### 3.3 DAQ_1c.py — offline WaveForms CSV analysis
+### 3.3 [DAQ_1c.py](../DAQ_1c.py) — offline WaveForms CSV analysis
 
 This program reads CSV files exported by Digilent WaveForms. It:
 
@@ -164,9 +166,9 @@ The offline algorithm predates the current live vectorized detector and is not n
 
 Files under DAQ_system/scripts are editable launch examples, not permanent experiment configuration.
 
-- run_monitor.sh runs LiveDAQ_1c.py with an external stimulus or detector and keeps W1 disabled.
-- run_wavegen.sh runs LiveDAQ_1c.py and enables W1.
-- run_simulate.sh contains the currently selected simulation configuration. Inspect it before use because it may be changed frequently while testing GUI behavior.
+- [run_monitor.sh](../scripts/run_monitor.sh) runs [LiveDAQ_1c.py](../LiveDAQ_1c.py) with an external stimulus or detector and keeps W1 disabled.
+- [run_wavegen.sh](../scripts/run_wavegen.sh) runs [LiveDAQ_1c.py](../LiveDAQ_1c.py) and enables W1.
+- [run_simulate.sh](../scripts/run_simulate.sh) contains the currently selected simulation configuration. Inspect it before use because it may be changed frequently while testing GUI behavior.
 
 ---
 
@@ -297,6 +299,8 @@ Add --headless to disable Tkinter. Detected pulses are printed to the terminal. 
 
 ### 6.1 Common acquisition path
 
+This path is implemented independently in [LiveDAQ_1c.py](../LiveDAQ_1c.py) and [LiveDAQ_1c_flat.py](../LiveDAQ_1c_flat.py).
+
     AD3 DWF Record mode or SimulatedSource
                       |
                       v
@@ -315,7 +319,7 @@ The acquisition worker currently performs the DWF read, pulse detection, charge 
 
 ### 6.2 Additional flat plot path
 
-Flat mode also publishes each NumPy DataChunk by reference:
+The [flat implementation](../LiveDAQ_1c_flat.py) also publishes each NumPy `DataChunk` by reference:
 
     acquisition worker
             |
@@ -500,7 +504,7 @@ Charge is:
 
 ### 11.1 Non-flat overlay mode
 
-LiveDAQ_1c.py:
+[LiveDAQ_1c.py](../LiveDAQ_1c.py):
 
 - Polls GUI queues at --gui-rate, default 10 Hz.
 - Accumulates --canva-size pulses for the canvas.
@@ -514,7 +518,7 @@ The --canva-size type is integer.
 
 ### 11.2 Flat continuous mode
 
-LiveDAQ_1c_flat.py:
+[LiveDAQ_1c_flat.py](../LiveDAQ_1c_flat.py):
 
 - Uses --canva-size as seconds.
 - Collects exactly that many acquired seconds per plot interval.
@@ -541,46 +545,46 @@ The current renderer keeps the retained data but sends roughly two extrema per h
 
 | Argument | Default | Meaning |
 |---|---:|---|
-| --sample-rate | 500,000 S/s | Requested AD3 Record rate. Always check the returned actual rate and integrity counters. |
-| --input-range | 1.0 V | Scope Channel 1 input range. Increase if clipping occurs. |
-| --gain-v-per-pc | 1.4 | Nominal CR-110 conversion gain. |
-| --tau-us | 140 us | Decay constant used to size detector windows. |
-| --threshold-sigma | 8 | Adaptive edge threshold in robust noise sigma. |
-| --min-charge-fc | 1 fC | Absolute minimum threshold. Bench scripts normally use a higher value. |
-| --polarity | both | Accepted sign: both, positive, or negative. |
-| --pretrigger-ms | 0.5 ms | Waveform retained before onset. |
-| --posttrigger-ms | 1.5 ms | Waveform retained after onset. |
-| --canva-size | File dependent | Non-flat: integer pulse count. Flat: floating-point seconds. |
-| --num-test | 10 | Number of result rows replaced as one non-overlapping batch. |
-| --gui-rate | 10 Hz non-flat | GUI polling rate in non-flat mode. Flat timing comes from --canva-size. |
-| --no-save | Off | Disable output files; recommended for throughput tests. |
-| --save-waveforms | Off | Save accepted per-pulse waveform windows in addition to summaries. |
-| --output-root | results/live | Parent of timestamped run directories. |
-| --wavegen | Off | Enable W1 square-wave output. |
-| --wavegen-frequency | 500 Hz | W1 frequency. |
-| --wavegen-vpp | 0.100 V | W1 peak-to-peak amplitude. |
-| --wavegen-offset | 0 V | W1 DC offset. |
-| --device-index | -1 | Automatic/first-device selection. |
-| --dwf-library | automatic | Explicit DWF library path if discovery fails. |
-| --simulate | Off | Use the synthetic source instead of hardware. |
-| --headless | Off | Disable Tkinter and print pulses to the terminal. |
-| --duration | 0 | Wall-clock run duration; zero means run until stopped. |
+| `--sample-rate` | 500,000 S/s | Requested AD3 Record rate. Always check the returned actual rate and integrity counters. |
+| `--input-range` | 1.0 V | Scope Channel 1 input range. Increase if clipping occurs. |
+| `--gain-v-per-pc` | 1.4 | Nominal CR-110 conversion gain. |
+| `--tau-us` | 140 us | Decay constant used to size detector windows. |
+| `--threshold-sigma` | 8 | Adaptive edge threshold in robust noise sigma. |
+| `--min-charge-fc` | 1 fC | Absolute minimum threshold. Bench scripts normally use a higher value. |
+| `--polarity` | `both` | Accepted sign: `both`, `positive`, or `negative`. |
+| `--pretrigger-ms` | 0.5 ms | Waveform retained before onset. |
+| `--posttrigger-ms` | 1.5 ms | Waveform retained after onset. |
+| `--canva-size` | File dependent | Non-flat: integer pulse count. Flat: floating-point seconds. |
+| `--num-test` | 10 | Number of result rows replaced as one non-overlapping batch. |
+| `--gui-rate` | 10 Hz non-flat | GUI polling rate in non-flat mode. Flat timing comes from `--canva-size`. |
+| `--no-save` | Off | Disable output files; recommended for throughput tests. |
+| `--save-waveforms` | Off | Save accepted per-pulse waveform windows in addition to summaries. |
+| `--output-root` | `results/live` | Parent of timestamped run directories. |
+| `--wavegen` | Off | Enable W1 square-wave output. |
+| `--wavegen-frequency` | 500 Hz | W1 frequency. |
+| `--wavegen-vpp` | 0.100 V | W1 peak-to-peak amplitude. |
+| `--wavegen-offset` | 0 V | W1 DC offset. |
+| `--device-index` | -1 | Automatic/first-device selection. |
+| `--dwf-library` | automatic | Explicit DWF library path if discovery fails. |
+| `--simulate` | Off | Use the synthetic source instead of hardware. |
+| `--headless` | Off | Disable Tkinter and print pulses to the terminal. |
+| `--duration` | 0 | Wall-clock run duration; zero means run until stopped. |
 
-The historical --canva-pulse and --canvas-pulse names are no longer accepted. Use --canva-size.
+The historical `--canva-pulse` and `--canvas-pulse` names are no longer accepted. Use `--canva-size`.
 
 ---
 
 ## 13. Output files
 
-Unless --no-save is present, each run creates a timestamped directory under:
+Unless `--no-save` is present, each run creates a timestamped directory under `DAQ_system/results/live/`:
 
     DAQ_system/results/live/
 
-### run_config.json
+### `run_config.json`
 
 Records the effective acquisition, detector, GUI, output, and W1 settings. In flat mode, gui_rate_hz is derived from the selected canva_size.
 
-### pulses.csv
+### `pulses.csv`
 
 One row per accepted pulse:
 
@@ -595,9 +599,9 @@ One row per accepted pulse:
 - signed charge
 - absolute charge
 
-### pulse_waveforms.csv
+### `pulse_waveforms.csv`
 
-Created only with --save-waveforms. It stores decimated accepted pulse captures, limited to approximately 500 saved points per pulse.
+Created only with `--save-waveforms`. It stores decimated accepted pulse captures, limited to approximately 500 saved points per pulse.
 
 The software does not save the complete uninterrupted raw stream, including in flat mode.
 
@@ -655,6 +659,8 @@ Implemented performance improvements:
 - at most 50,000 retained flat plot samples
 - vectorized per-pixel min/max Canvas envelope
 
+**Current result:** After these optimizations, both [LiveDAQ_1c.py](../LiveDAQ_1c.py) and [LiveDAQ_1c_flat.py](../LiveDAQ_1c_flat.py) sustained 500 kS/s on the laboratory computer with `lost 0` and `corrupted 0`. This supersedes the earlier approximately 120 kS/s observation for the older implementation. The result applies to the tested hardware, computer load, script parameters, and output settings; future configuration changes should still be checked using the on-screen counters.
+
 ### 14.7 Flat simulation froze the computer
 
 Cause: the first optimized flat renderer retained 50,000 samples and sent all of them directly to Tk Canvas, producing approximately 100,000 coordinate arguments every update.
@@ -691,8 +697,10 @@ At 50 kS/s, sampling phase can noticeably reduce the measured peak. Use low rate
 - Oscilloscope measurement reproduced tau near 140 us.
 - AD3 acquired the CR-110 output successfully.
 - Closing the metal enclosure reduced periodic pickup.
-- An earlier non-flat version reached approximately 120 kS/s without data warnings when the computer was otherwise lightly loaded.
-- Earlier flat implementations produced more throughput problems.
+- An earlier non-flat implementation reached approximately 120 kS/s without data warnings when the computer was otherwise lightly loaded.
+- Earlier flat implementations produced more throughput problems before plot retention and Canvas rendering were optimized.
+- The current optimized [non-flat program](../LiveDAQ_1c.py) has sustained 500 kS/s with `lost 0` and `corrupted 0` on the physical AD3.
+- The current optimized [flat program](../LiveDAQ_1c_flat.py) has also sustained 500 kS/s with `lost 0` and `corrupted 0` on the physical AD3.
 
 ### Current software validation
 
@@ -716,22 +724,11 @@ Checks performed during development include:
 
 Current simulation runs for both GUI variants complete without an identified functional problem.
 
-### Required physical validation
+### Completed physical throughput validation
 
-The current optimized files have not yet demonstrated their maximum stable rate on the laboratory AD3.
+Both optimized GUI variants have now been tested separately with the physical AD3 at 500 kS/s. Neither run produced lost or corrupted samples. The one-channel implementation therefore meets the current target of at least 200 kS/s and has demonstrated clean operation at 500 kS/s in the tested setup.
 
-Recommended sequence for each GUI:
-
-1. 200 kS/s with --no-save.
-2. 300 kS/s with --no-save.
-3. 400 kS/s with --no-save.
-4. 500 kS/s with --no-save.
-5. Repeat the highest clean rate with summary saving.
-6. Repeat with --save-waveforms if waveform output is required.
-
-Run long enough to observe many pulses. Require continuous lost 0 and corrupted 0.
-
-Test non-flat and flat separately; a clean result in one does not prove the other GUI has the same performance margin.
+This is a demonstrated operating point, not a universal guarantee. Revalidate the counters after changing the computer, USB connection, enabled output files, input-channel count, canvas settings, or other workload. If the 500 kS/s tests did not include normal summary saving or --save-waveforms, repeat those output modes before relying on them for production acquisition. Future test records should also note run duration and exact command-line settings.
 
 ---
 
@@ -751,7 +748,7 @@ Current order:
 
     read AD3 -> detect -> calculate noise when due -> log -> read AD3
 
-If 200 kS/s cannot remain clean, the next major optimization should be:
+The current one-channel programs are clean at 500 kS/s in the tested configuration, so this separation is not presently required. If future logging, two-channel acquisition, longer runs, or a different computer causes lost/corrupted samples, the next major optimization should be:
 
     AD3 reader thread
             |
@@ -853,7 +850,7 @@ The _1c suffix reserves these validated programs as the one-channel generation. 
 
 1. Stop the run and do not treat it as production-quality.
 2. Restart with --no-save.
-3. Use non-flat LiveDAQ_1c.py first.
+3. Use the non-flat [LiveDAQ_1c.py](../LiveDAQ_1c.py) first.
 4. Close unnecessary applications.
 5. Reduce sample rate.
 6. Check USB.
@@ -861,7 +858,7 @@ The _1c suffix reserves these validated programs as the one-channel generation. 
 
 ### GUI becomes unresponsive
 
-- Confirm the current flat renderer includes min_max_plot_envelope.
+- Confirm the current [flat renderer](../LiveDAQ_1c_flat.py) includes `min_max_plot_envelope`.
 - Stop stale Python processes before starting another run.
 - Use --headless to isolate GUI cost.
 - Increase flat --canva-size cautiously; longer windows increase raw samples before the 50,000-point cap.
@@ -891,7 +888,7 @@ Before collecting data:
 9. Confirm expected polarity and charge scale.
 10. Require lost 0 and corrupted 0.
 11. Enable saving only after a clean throughput test.
-12. Preserve run_config.json with saved data.
+12. Preserve `run_config.json` with saved data.
 
 When modifying code:
 
@@ -906,4 +903,4 @@ When modifying code:
 9. Record physical stable-rate results in this document.
 10. Commit code and documentation together.
 
-The immediate next milestone is laboratory validation of both optimized GUI variants at 200 kS/s and above. If either variant produces lost or corrupted samples, first isolate GUI and logging cost with --headless and --no-save, then consider separating acquisition, detection, and logging into independent workers.
+The one-channel throughput target has been met: both optimized GUI variants have sustained 500 kS/s with `lost 0` and `corrupted 0` on the physical AD3. The next one-channel milestones are to record the exact duration and output settings of production-style runs, verify any required saving modes, and replace the nominal charge conversion with a detector-specific calibration. If a future configuration produces data warnings, first isolate GUI and logging cost with `--headless` and `--no-save`, then consider separating acquisition, detection, and logging into independent workers.

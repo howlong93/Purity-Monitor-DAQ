@@ -1,0 +1,422 @@
+# Purity Monitor DAQ System
+
+Live data acquisition and monitoring for CR-150/CR-110 charge-sensitive preamplifiers using a Digilent Analog Discovery 3 (AD3).
+
+This README is the practical starting point for detector users. Detailed engineering notes are available in [`docs/notes_1c.md`](docs/notes_1c.md) and [`docs/notes_2c.md`](docs/notes_2c.md).
+
+> **Current status:** Simulation is available for every live program. The two-channel programs still require validation with the physical AD3, two CR-110 readout chains, and the purity monitor. Displayed charge currently uses the nominal CR-110 gain and is not yet a detector-calibrated physics result.
+
+## Contents
+
+1. [Purpose and architecture](#purpose-and-architecture)
+2. [Requirements](#requirements)
+3. [Choose a program](#choose-a-program)
+4. [Quick start](#quick-start)
+5. [Example scripts](#example-scripts)
+6. [Arguments common to all four live programs](#arguments-common-to-all-four-live-programs)
+7. [Program-specific arguments](#program-specific-arguments)
+8. [Output files](#output-files)
+9. [Operating notes](#operating-notes)
+10. [Further documentation](#further-documentation)
+
+---
+
+## Purpose and architecture
+
+The DAQ continuously reads one or two CR-110 outputs through the AD3, learns the background noise, detects charge pulses, displays live waveforms, and optionally saves numerical results.
+
+The two-channel programs are intended for the complete purity monitor:
+
+```text
+Cathode -> CR-150 / CR-110 -> AD3 Channel 1 --+
+                                                  +-> Python DAQ -> Qc, Qa, delay, Qa/Qc
+Anode   -> CR-150 / CR-110 -> AD3 Channel 2 --+
+```
+
+The one-channel programs are useful for electronics tests, individual-channel commissioning, and performance diagnosis:
+
+```text
+Signal source -> CR-150 / CR-110 -> AD3 Channel 1 -> Python DAQ
+```
+
+All four live programs share the same basic processing path:
+
+```text
+AD3 Record acquisition or simulation
+                |
+                v
+       One-second noise learning
+                |
+                v
+       Charge-pulse detection
+                |
+                +-> GUI waveform display
+                |
+                +-> Result table and optional CSV output
+```
+
+The two-channel versions add independent detection for each channel and pair cathode/anode pulses by their peak-time separation.
+
+---
+
+## Requirements
+
+### Software
+
+- Python 3.10 or newer.
+- NumPy.
+- Tkinter for the GUI. It is normally included with standard Windows Python installations.
+- Digilent WaveForms with the WaveForms SDK for physical AD3 operation.
+- Bash for the supplied `.sh` scripts. On Windows, Git Bash is suitable.
+
+Install NumPy if necessary:
+
+```bash
+python -m pip install numpy
+```
+
+Simulation does not require an AD3 or the WaveForms SDK.
+
+### Before using physical hardware
+
+1. Install Digilent WaveForms and its SDK.
+2. Connect the AD3 before starting Python.
+3. Close the WaveForms desktop application. WaveForms and Python cannot own the same AD3 simultaneously.
+4. Verify BNC Adapter coupling, attenuation, grounding, and signal polarity.
+5. Verify that the requested AD3 input range will not clip the signal.
+6. Leave W1 disabled during detector operation. It is enabled only with `--wavegen`.
+
+---
+
+## Choose a program
+
+The four main live programs are:
+
+| Program | Inputs | Canvas style | Use it when... |
+|---|---:|---|---|
+| [`LiveDAQ_1c.py`](LiveDAQ_1c.py) | 1 | Event-centered, one or more accepted pulses aligned/overlaid | Testing one CR-110 channel or monitoring individual detected pulses |
+| [`LiveDAQ_1c_flat.py`](LiveDAQ_1c_flat.py) | 1 | Consecutive raw time windows | Inspecting continuous Channel 1 behavior, noise, baseline, or missed pulses |
+| [`LiveDAQ_2c.py`](LiveDAQ_2c.py) | 2 | Latest paired cathode/anode event | Monitoring paired purity-monitor events and preliminary `Qc`, `Qa`, delay, and `Qa/Qc` |
+| [`LiveDAQ_2c_flat.py`](LiveDAQ_2c_flat.py) | 2 | Consecutive raw two-channel time windows | Inspecting the full cathode-to-anode time sequence, noise, bumps, false triggers, or pairing behavior |
+
+### Additional offline utility
+
+[`DAQ_1c.py`](DAQ_1c.py) analyzes Channel 1 CSV files exported by Digilent WaveForms. It is not one of the four live programs and does not control the AD3.
+
+### Non-flat versus flat
+
+Use a non-flat program when accepted events and their measured values are the main interest.
+
+Use a flat program when continuous raw context is important. Flat programs show fixed, consecutive, non-overlapping time intervals. They retain at most 50,000 timestamp positions per canvas interval and use a min/max display envelope to preserve narrow extrema.
+
+Display reduction affects only plotting. Pulse detection still processes the acquired samples before canvas reduction.
+
+---
+
+## Quick start
+
+Open a terminal in the downloaded `DAQ_system` directory:
+
+```bash
+cd DAQ_system
+```
+
+### Safest first test: one-channel simulation
+
+```bash
+python LiveDAQ_1c.py \
+  --simulate \
+  --sample-rate 200000 \
+  --simulation-charge-fc 100 \
+  --min-charge-fc 40 \
+  --canva-size 1 \
+  --no-save
+```
+
+### Two-channel event simulation
+
+```bash
+python LiveDAQ_2c.py \
+  --simulate \
+  --sample-rate 200000 \
+  --simulation-cathode-charge-fc 100 \
+  --simulation-anode-charge-fc 95 \
+  --drift-time-us 55 \
+  --drift-window-us 15 \
+  --min-charge-fc 40 \
+  --no-save
+```
+
+### Two-channel continuous-time simulation
+
+```bash
+python LiveDAQ_2c_flat.py \
+  --simulate \
+  --sample-rate 200000 \
+  --simulation-cathode-charge-fc 100 \
+  --simulation-anode-charge-fc 95 \
+  --drift-time-us 55 \
+  --drift-window-us 15 \
+  --min-charge-fc 40 \
+  --canva-size 0.500 \
+  --no-save
+```
+
+### One-channel hardware template
+
+Close WaveForms, connect the CR-110 output to AD3 Channel 1, then run:
+
+```bash
+python LiveDAQ_1c.py \
+  --sample-rate 200000 \
+  --input-range 1.0 \
+  --min-charge-fc 40 \
+  --polarity positive \
+  --canva-size 1
+```
+
+Adjust polarity and threshold to the measured hardware signal.
+
+### Two-channel hardware template
+
+Close WaveForms, connect cathode output to Channel 1 and anode output to Channel 2, then run:
+
+```bash
+python LiveDAQ_2c_flat.py \
+  --sample-rate 200000 \
+  --input-range 1.0 \
+  --channel-1-polarity negative \
+  --channel-2-polarity positive \
+  --drift-time-us 55 \
+  --drift-window-us 15 \
+  --min-charge-fc 40 \
+  --canva-size 0.500
+```
+
+The current `55 +/- 15 us` pairing rule is provisional. Determine the correct timing from physical data before using pairing for production analysis.
+
+### Stop a run
+
+- GUI mode: click **Stop** and allow the acquisition worker to close safely.
+- Headless mode: press `Ctrl+C`.
+- Use `--duration N` to stop automatically after `N` wall-clock seconds.
+
+### See the authoritative CLI help
+
+For any program:
+
+```bash
+python LiveDAQ_2c.py --help
+```
+
+The program's `--help` output is authoritative if the code and README ever differ.
+
+---
+
+## Example scripts
+
+The scripts change to their own directory before launching Python, so they can be called from elsewhere.
+
+Run a script with:
+
+```bash
+bash scripts/run_simulate.sh
+```
+
+| Script | Intended use |
+|---|---|
+| [`scripts/run_simulate.sh`](scripts/run_simulate.sh) | One-channel GUI and detector demonstration without hardware |
+| [`scripts/run_monitor.sh`](scripts/run_monitor.sh) | Basic one-channel CR-110 monitoring |
+| [`scripts/run_wavegen.sh`](scripts/run_wavegen.sh) | Controlled one-channel electronics bench test; do not use W1 during normal detector operation |
+| [`scripts/run_2c_simulate.sh`](scripts/run_2c_simulate.sh) | Two-channel flat GUI demonstration without hardware |
+| [`scripts/run_2c_monitor.sh`](scripts/run_2c_monitor.sh) | Initial two-channel purity-monitor hardware run without W1 or waveform-CSV overhead |
+
+Scripts are examples, not fixed experimental configurations. Open the relevant script and copy or adjust its arguments for a new run.
+
+---
+
+## Arguments common to all four live programs
+
+These arguments are accepted by all four live programs. Defaults that intentionally differ by program are identified explicitly.
+
+| Argument | Datatype | Default | Meaning |
+|---|---|---|---|
+| `--simulate` | Boolean flag | Off | Use a synthetic source instead of opening physical AD3 hardware. |
+| `--headless` | Boolean flag | Off | Disable Tk GUI and print accepted events to the terminal. Flat programs also avoid publishing plot data. |
+| `--duration` | Float, seconds | `0.0` | Stop after this many wall-clock seconds. Zero runs until stopped manually. |
+| `--sample-rate` | Float, samples/s | `500000.0` | Requested AD3 Record rate per enabled channel. Always check the actual rate and integrity counters. |
+| `--input-range` | Float, volts | `1.0` | AD3 input range. Applies to Channel 1 and, in 2c programs, Channel 2. Increase it if clipping occurs. |
+| `--gain-v-per-pc` | Float, V/pC | `1.4` | Nominal CR-110 charge-to-voltage gain. One global value currently applies to both 2c channels. |
+| `--tau-us` | Float, microseconds | `140.0` | CR-110 decay constant used to size detection and capture intervals. One global value currently applies to both 2c channels. |
+| `--threshold-sigma` | Float | `8.0` | Adaptive edge threshold in robust background-noise sigma. |
+| `--min-charge-fc` | Float, fC | `1.0` | Absolute minimum accepted charge threshold. Practical scripts use higher values to reject noise. |
+| `--polarity` | Choice string: `both`, `positive`, `negative` | 1c: `both`; 2c: unset | 1c: accepted pulse sign. 2c: optional compatibility override applied to both channels; channel-specific options are preferred. |
+| `--pretrigger-ms` | Float, milliseconds | `0.5` | Waveform duration retained before detected onset. |
+| `--posttrigger-ms` | Float, milliseconds | `1.5` | Waveform duration retained after detected onset. |
+| `--gui-rate` | Float, Hz | Non-flat: `10.0`; 1c flat: `2.0`; 2c flat: `10.0` | GUI polling rate for non-flat programs. Accepted only for compatibility in flat programs; flat refresh timing is set by `--canva-size`. |
+| `--num-test` | Integer | `10` | Number of result rows replaced together as one non-overlapping batch. |
+| `--output-root` | Path | Program-dependent under `results/` | Parent directory for timestamped run folders. See [Output files](#output-files). |
+| `--no-save` | Boolean flag | Off | Disable all summary and waveform output. Useful for throughput tests. |
+| `--save-waveforms` | Boolean flag | Off | In addition to the default summary, save decimated accepted waveform captures. |
+| `--wavegen` | Boolean flag | Off | Enable AD3 W1 square-wave output. Keep it off during normal detector operation. |
+| `--wavegen-frequency` | Float, Hz | `500.0` | W1 square-wave frequency when `--wavegen` is enabled. |
+| `--wavegen-vpp` | Float, volts | `0.100` | W1 peak-to-peak amplitude. |
+| `--wavegen-offset` | Float, volts | `0.0` | W1 DC offset. |
+| `--device-index` | Integer | `-1` | DWF device selection. `-1` requests automatic/first-device selection. |
+| `--dwf-library` | String or path | Automatic (`None`) | Explicit WaveForms SDK library path if automatic discovery fails. |
+| `--simulation-pulse-rate` | Float, Hz | `10.0` | Simulated physical-event repetition rate. |
+| `--simulation-polarity` | Choice string: `positive`, `negative` | 1c: `negative`; 2c: unset | 1c simulated pulse sign. Retained only for CLI compatibility in 2c; 2c simulation uses negative cathode and positive anode defaults. |
+| `--simulation-speed` | Float, multiplier | `1.0` | Simulated time divided by wall time. This does not model physical AD3 throughput. |
+
+Boolean flags are enabled by including the argument, for example `--simulate`. Do not write `--simulate true`.
+
+---
+
+## Program-specific arguments
+
+### `LiveDAQ_1c.py`
+
+| Argument | Datatype | Default | Meaning |
+|---|---|---:|---|
+| `--canva-size` | Integer, pulses | `1` | Wait for this many newly accepted pulses, then replace the canvas with their aligned overlay. This is not a sliding window. |
+| `--simulation-charge-fc` | Float, fC | `100.0` | Charge of each simulated one-channel pulse. |
+
+Example:
+
+```bash
+python LiveDAQ_1c.py --simulate --canva-size 5 --simulation-charge-fc 100
+```
+
+### `LiveDAQ_1c_flat.py`
+
+| Argument | Datatype | Default | Meaning |
+|---|---|---:|---|
+| `--canva-size` | Float, seconds | `0.500` | Duration of each consecutive non-overlapping raw Channel 1 canvas interval and its update period. |
+| `--simulation-charge-fc` | Float, fC | `100.0` | Charge of each simulated one-channel pulse. |
+
+Example:
+
+```bash
+python LiveDAQ_1c_flat.py --simulate --canva-size 0.500 --simulation-charge-fc 100
+```
+
+### `LiveDAQ_2c.py`
+
+| Argument | Datatype | Default | Meaning |
+|---|---|---:|---|
+| `--channel-1-polarity` | Choice string: `both`, `positive`, `negative` | `negative` | Accepted polarity for cathode / Channel 1. |
+| `--channel-2-polarity` | Choice string: `both`, `positive`, `negative` | `positive` | Accepted polarity for anode / Channel 2. |
+| `--drift-time-us` | Float, microseconds | `55.0` | Expected anode-peak minus cathode-peak delay used as the pairing-window center. |
+| `--drift-window-us` | Float, microseconds | `15.0` | Pairing tolerance around `--drift-time-us`. It must be smaller than the center value. |
+| `--simulation-cathode-charge-fc` | Float, fC | `100.0` | Simulated cathode charge `Qc`. |
+| `--simulation-anode-charge-fc` | Float, fC | `95.0` | Simulated anode charge `Qa`. |
+
+There is no `--canva-size` in the non-flat two-channel program. Its canvas updates when a new completed pair reaches the GUI.
+
+Example:
+
+```bash
+python LiveDAQ_2c.py \
+  --simulate \
+  --simulation-cathode-charge-fc 100 \
+  --simulation-anode-charge-fc 95 \
+  --drift-time-us 55 \
+  --drift-window-us 15
+```
+
+### `LiveDAQ_2c_flat.py`
+
+| Argument | Datatype | Default | Meaning |
+|---|---|---:|---|
+| `--channel-1-polarity` | Choice string: `both`, `positive`, `negative` | `negative` | Accepted polarity for cathode / Channel 1. |
+| `--channel-2-polarity` | Choice string: `both`, `positive`, `negative` | `positive` | Accepted polarity for anode / Channel 2. |
+| `--canva-size` | Float, seconds | `0.500` | Duration of each consecutive non-overlapping raw two-channel canvas interval and its update period. |
+| `--drift-time-us` | Float, microseconds | `55.0` | Expected anode-peak minus cathode-peak delay used as the pairing-window center. |
+| `--drift-window-us` | Float, microseconds | `15.0` | Pairing tolerance around `--drift-time-us`. It must be smaller than the center value. |
+| `--simulation-cathode-charge-fc` | Float, fC | `100.0` | Simulated cathode charge `Qc`. |
+| `--simulation-anode-charge-fc` | Float, fC | `95.0` | Simulated anode charge `Qa`. |
+
+Example:
+
+```bash
+python LiveDAQ_2c_flat.py \
+  --simulate \
+  --canva-size 0.500 \
+  --simulation-cathode-charge-fc 100 \
+  --simulation-anode-charge-fc 95 \
+  --drift-time-us 55 \
+  --drift-window-us 15
+```
+
+---
+
+## Output files
+
+Saving is enabled by default unless `--no-save` is present. Each run creates a timestamped subdirectory.
+
+| Program family | Default parent directory | Summary | Optional waveform file |
+|---|---|---|---|
+| 1c non-flat and flat | `results/live/` | `pulses.csv` | `pulse_waveforms.csv` |
+| 2c non-flat | `results/live_2c/` | `pulse_pairs.csv` | `pair_waveforms.csv` |
+| 2c flat | `results/live_2c_flat/` | `pulse_pairs.csv` | `pair_waveforms.csv` |
+
+Every saved run also contains `run_config.json` with the effective DAQ settings.
+
+Use `--save-waveforms` only when accepted waveform captures are needed. CSV waveform writing adds storage and CPU load and may reduce the highest stable hardware sampling rate.
+
+The waveform CSV files contain decimated accepted captures, not a complete raw continuous recording.
+
+---
+
+## Operating notes
+
+### Charge values are preliminary
+
+The live programs currently calculate:
+
+```text
+charge [fC] = abs(peak amplitude [V]) / gain [V/pC] * 1000
+```
+
+The default gain is the nominal CR-110 value of `1.4 V/pC`. Final purity-monitor operation requires channel-specific calibration and a validated waveform-integration or model-fitting method. Do not interpret the current live `Qa/Qc` as a final electron survival ratio without calibration.
+
+### Noise learning
+
+Every run begins with approximately one second of background-noise learning. Pulse detection is intentionally disabled until a robust noise estimate is ready.
+
+If the program remains at `Learning noise`, check whether data are arriving continuously and whether lost samples repeatedly reset the detector.
+
+### Lost and corrupted data
+
+The GUI reports `lost` and `corrupted` counters from DWF.
+
+- `lost > 0` means samples were overwritten before Python read them.
+- `corrupted > 0` means DWF marked returned samples as unreliable.
+
+For measurement data, both should remain zero. Lower the sampling rate, disable waveform saving, use headless/non-flat mode, or reduce other computer load if the counters increase.
+
+### Pairing is provisional
+
+The 2c programs currently pair pulses using cathode-to-anode **peak time**. The default accepted range is `55 +/- 15 us`, or approximately 40-70 us. Confirm the correct timing definition and range with physical purity-monitor data.
+
+### Coupling and shielding
+
+The Python programs do not configure physical AC/DC coupling on the BNC Adapter. Verify coupling, attenuation, grounding, enclosure closure, and cable routing before every hardware run.
+
+### W1 safety
+
+`--wavegen` enables AD3 W1. Use it only for a planned electronics bench test. Do not connect or enable W1 as part of normal detector acquisition unless the setup has been explicitly reviewed.
+
+---
+
+## Further documentation
+
+- [`docs/notes_1c.md`](docs/notes_1c.md): detailed one-channel architecture, performance history, detector logic, and troubleshooting.
+- [`docs/notes_2c.md`](docs/notes_2c.md): detailed two-channel architecture, pairing, validation status, calibration plan, limitations, and laboratory test sequence.
+- [`../Parameter_Reference.md`](../Parameter_Reference.md): detector, electronics, charge, timing, and operating parameter reference.
+- [`../design_notes.md`](../design_notes.md): broader readout-system goals and current project direction.
+- [`../design_concerns.md`](../design_concerns.md): electronics and system design risks.
+- [`../datasheets/CR-110-R2_datasheet.pdf`](../datasheets/CR-110-R2_datasheet.pdf): CR-110-R2 hardware reference.
+- [`../paper/Vyara_Thesis_Final.pdf`](../paper/Vyara_Thesis_Final.pdf): purity-monitor waveform, timing, charge-analysis, and hardware reference.
+
+For a new user, read this README first, run a simulation, then read the channel-specific engineering notes before connecting detector hardware.
