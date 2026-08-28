@@ -9,7 +9,7 @@ This README is the practical starting point for detector users. Detailed enginee
 ## Contents
 
 1. [System overview and validation status](#system-overview-and-validation-status)
-2. [Clone, installation, and path portability](#clone-installation-and-path-portability)
+2. [Installation](#installation)
 3. [Choose a program](#choose-a-program)
 4. [First simulation and success criteria](#first-simulation-and-success-criteria)
 5. [First hardware run](#first-hardware-run)
@@ -71,7 +71,7 @@ The 500 kS/s result is a demonstrated operating point for the tested computer, U
 
 ---
 
-## Clone, installation, and path portability
+## Installation
 
 Clone the repository and enter the repository root:
 
@@ -80,7 +80,7 @@ git clone https://github.com/howlong93/Purity-Monitor-DAQ.git
 cd Purity-Monitor-DAQ
 ```
 
-Unless stated otherwise, run the commands in this README from the repository root.
+Run the commands below from the repository root unless stated otherwise.
 
 ### Software
 
@@ -96,28 +96,7 @@ Install the pip-managed dependency from [`requirements.txt`](requirements.txt):
 python -m pip install -r requirements.txt
 ```
 
-Simulation does not require an AD3 or the WaveForms SDK.
-
-Tkinter is installed with the standard Windows Python distribution but is not a pip package. On Linux, install the operating system's Tkinter package if GUI startup reports that it is missing.
-
-### Before using physical hardware
-
-1. Install Digilent WaveForms and its SDK.
-2. Connect the AD3 before starting Python.
-3. Close the WaveForms desktop application. WaveForms and Python cannot own the same AD3 simultaneously.
-4. Verify BNC Adapter coupling, attenuation, grounding, and signal polarity.
-5. Verify that the requested AD3 input range will not clip the signal.
-6. Leave W1 disabled during detector operation. It is enabled only with `--wavegen`.
-
-### Path portability
-
-No source-code path should need to be edited after cloning or copying the folder:
-
-- Python resolves default input and output locations relative to each source file.
-- Timestamped output directories are created automatically under `results/`.
-- Shell scripts locate their own directory before launching Python, so they can be called from another working directory.
-- The repository can be located in a path containing spaces.
-- The repository root must be writable when saving is enabled.
+Simulation does not require an AD3 or the WaveForms SDK. Physical acquisition requires both.
 
 On Windows, the programs automatically search the standard DWF locations:
 
@@ -132,7 +111,16 @@ macOS and Linux use the normal WaveForms framework/shared-library locations. Onl
 python LiveDAQ_1c.py --dwf-library "D:/custom/path/dwf.dll"
 ```
 
-The supplied `.sh` files use LF line endings and are stored with the Git executable bit. On Windows, run them through Git Bash. On Linux/macOS, either `./scripts/script_name.sh` or `bash scripts/script_name.sh` is valid.
+Tkinter is installed with the standard Windows Python distribution but is not a pip package. On Linux, install the operating system's Tkinter package if GUI startup reports that it is missing.
+
+### Before using physical hardware
+
+1. Install Digilent WaveForms and its SDK.
+2. Connect the AD3 before starting Python.
+3. Close the WaveForms desktop application. WaveForms and Python cannot own the same AD3 simultaneously.
+4. Verify BNC Adapter coupling, attenuation, grounding, and signal polarity.
+5. Verify that the requested AD3 input range will not clip the signal.
+6. Leave W1 disabled during detector operation. It is enabled only with `--wavegen`.
 
 ---
 
@@ -163,7 +151,7 @@ Display reduction affects only plotting. Pulse detection still processes the acq
 
 ## First simulation and success criteria
 
-Open a terminal in the repository root. The safest first test is the one-channel non-flat simulation:
+Start with the one-channel non-flat simulation:
 
 ```bash
 python LiveDAQ_1c.py \
@@ -337,8 +325,6 @@ The program's `--help` output is authoritative if the code and README ever diffe
 
 ## Example scripts
 
-The scripts change to their own directory before launching Python, so they can be called from elsewhere.
-
 Run a script with:
 
 ```bash
@@ -482,7 +468,7 @@ python LiveDAQ_2c_flat.py \
 
 Saving is enabled by default unless `--no-save` is present. Each run creates a timestamped subdirectory.
 
-The parent and timestamped directories are created automatically; no absolute output path needs to be edited after cloning. The repository root must be writable when saving is enabled.
+Output directories are created automatically. The repository root must be writable when saving is enabled.
 
 | Program family | Default parent directory | Summary | Optional waveform file |
 |---|---|---|---|
